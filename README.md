@@ -1,4 +1,5 @@
 # 欧思魔控 (osmoControl)
+如果觉得 有用，可以通过 [爱发电](https://ifdian.net/a/alliot)  支持！❤️  
 
 [GitHub 仓库](https://github.com/AlliotTech/osmoControl)
 
