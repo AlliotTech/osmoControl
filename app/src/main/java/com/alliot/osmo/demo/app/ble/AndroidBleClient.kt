@@ -56,7 +56,7 @@ class AndroidBleClient(
         BleConnectionState(
             isBluetoothEnabled = adapter?.isEnabled == true,
             isConnected = false,
-            localAdapterAddress = adapter?.address,
+            localAdapterAddress = readLocalAdapterAddress(),
             supportsWakeAdvertising = supportsWakeAdvertising(),
         ),
     )
@@ -84,7 +84,7 @@ class AndroidBleClient(
     override suspend fun startScan() {
         _connectionState.value = _connectionState.value.copy(
             isBluetoothEnabled = adapter?.isEnabled == true,
-            localAdapterAddress = adapter?.address,
+            localAdapterAddress = readLocalAdapterAddress(),
             supportsWakeAdvertising = supportsWakeAdvertising(),
         )
         val activeAdapter = adapter
@@ -319,7 +319,7 @@ class AndroidBleClient(
         _connectionState.value = BleConnectionState(
             isBluetoothEnabled = adapter?.isEnabled == true,
             isConnected = false,
-            localAdapterAddress = adapter?.address,
+            localAdapterAddress = readLocalAdapterAddress(),
             supportsWakeAdvertising = supportsWakeAdvertising(),
         )
         if (connectedAddress != null) {
@@ -373,7 +373,7 @@ class AndroidBleClient(
             isBluetoothEnabled = adapter?.isEnabled == true,
             isConnected = true,
             connectedAddress = address,
-            localAdapterAddress = adapter?.address,
+            localAdapterAddress = readLocalAdapterAddress(),
             supportsWakeAdvertising = supportsWakeAdvertising(),
         )
         Log.d(TAG, "GATT ready for $address")
@@ -433,7 +433,7 @@ class AndroidBleClient(
                     _connectionState.value = BleConnectionState(
                         isBluetoothEnabled = adapter?.isEnabled == true,
                         isConnected = false,
-                        localAdapterAddress = adapter?.address,
+                        localAdapterAddress = readLocalAdapterAddress(),
                         supportsWakeAdvertising = supportsWakeAdvertising(),
                     )
                     if (suppressNextDisconnectEvent) {
@@ -572,8 +572,17 @@ class AndroidBleClient(
         }
     }
 
+    // BLUETOOTH_CONNECT / BLUETOOTH_ADVERTISE are runtime permissions on API 31+. The BLE
+    // client is constructed before the user grants them, so these reads must not throw.
+    @SuppressLint("MissingPermission")
+    private fun readLocalAdapterAddress(): String? =
+        runCatching { adapter?.address }.getOrNull()
+
+    @SuppressLint("MissingPermission")
     private fun supportsWakeAdvertising(): Boolean =
-        adapter?.isMultipleAdvertisementSupported == true && advertiser != null
+        runCatching {
+            adapter?.isMultipleAdvertisementSupported == true && advertiser != null
+        }.getOrDefault(false)
 
     private fun ByteArray.toHex(): String = joinToString(" ") { "%02X".format(it) }
 }
