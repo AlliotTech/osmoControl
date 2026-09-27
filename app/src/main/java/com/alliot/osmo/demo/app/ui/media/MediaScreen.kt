@@ -1,5 +1,11 @@
 package com.alliot.osmo.demo.app.ui.media
 
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,10 +27,17 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.Switch
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -154,8 +167,13 @@ fun MediaScreen(
                 MediaRowCard(
                     row = row,
                     progress = state.downloadProgress[row.item.path],
+                    busy = state.processing.contains(row.item.path),
                     onDownload = { viewModel.download(row) },
                     onDelete = { viewModel.requestDelete(row) },
+                    onCapture = { viewModel.requestFrameCapture(row) },
+                    onTrim = { viewModel.requestTrim(row) },
+                    thumbnail = state.thumbnails[row.item.path],
+                    onRequestThumbnail = { viewModel.loadThumbnail(row) },
                 )
             }
             item {
@@ -165,8 +183,13 @@ fun MediaScreen(
                 MediaRowCard(
                     row = row,
                     progress = state.downloadProgress[row.item.path],
+                    busy = state.processing.contains(row.item.path),
                     onDownload = { viewModel.download(row) },
                     onDelete = { viewModel.requestDelete(row) },
+                    onCapture = { viewModel.requestFrameCapture(row) },
+                    onTrim = { viewModel.requestTrim(row) },
+                    thumbnail = state.thumbnails[row.item.path],
+                    onRequestThumbnail = { viewModel.loadThumbnail(row) },
                 )
             }
         }
@@ -192,6 +215,24 @@ fun MediaScreen(
             },
         )
     }
+
+    if (state.frameCaptureTarget != null) {
+        OffsetInputDialog(
+            title = "抽取一帧",
+            label = "时间点（秒）",
+            confirmLabel = "抽帧",
+            onConfirm = { viewModel.confirmFrameCapture(it * 1000L) },
+            onDismiss = viewModel::cancelFrameCapture,
+        )
+    }
+    val trimTarget = state.trimTarget
+    if (trimTarget != null) {
+        TrimInputDialog(
+            name = trimTarget.item.name,
+            onConfirm = { s, e -> viewModel.confirmTrim(s * 1000L, e * 1000L) },
+            onDismiss = viewModel::cancelTrim,
+        )
+    }
 }
 
 @Composable
@@ -209,9 +250,15 @@ private fun MediaStoreHeader(title: String, count: Int) {
 private fun MediaRowCard(
     row: MediaRow,
     progress: Float?,
+    busy: Boolean,
     onDownload: () -> Unit,
     onDelete: () -> Unit,
+    onCapture: () -> Unit,
+    onTrim: () -> Unit,
+    thumbnail: ByteArray?,
+    onRequestThumbnail: () -> Unit,
 ) {
+    LaunchedEffect(row.item.path) { onRequestThumbnail() }
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -223,6 +270,26 @@ private fun MediaRowCard(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            val bmp = remember(thumbnail) {
+                thumbnail?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
+            }
+            if (bmp != null) {
+                Image(
+                    bitmap = bmp,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(RoundedCornerShape(6.dp)),
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                )
+            }
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = row.item.name,
@@ -251,16 +318,106 @@ private fun MediaRowCard(
                     )
                 }
             }
-            if (progress == null) {
-                TextButton(onClick = onDownload) {
-                    Text(if (row.downloaded) "重下" else "下载")
-                }
-            }
-            if (row.canDelete) {
-                TextButton(onClick = onDelete) {
-                    Text("删除", color = MaterialTheme.colorScheme.error)
+            if (busy) {
+                Text(
+                    text = "处理中…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                Column(horizontalAlignment = Alignment.End) {
+                    if (progress == null) {
+                        TextButton(onClick = onDownload) {
+                            Text(if (row.downloaded) "重下" else "下载")
+                        }
+                        if (row.item.isVideo) {
+                            TextButton(onClick = onCapture) { Text("抽帧") }
+                            TextButton(onClick = onTrim) { Text("裁剪") }
+                        }
+                    }
+                    if (row.canDelete) {
+                        TextButton(onClick = onDelete) {
+                            Text("删除", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun OffsetInputDialog(
+    title: String,
+    label: String,
+    confirmLabel: String,
+    onConfirm: (Long) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var text by remember { mutableStateOf("") }
+    val value = text.toLongOrNull()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { new -> text = new.filter { it.isDigit() } },
+                label = { Text(label) },
+                singleLine = true,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { value?.let(onConfirm) }, enabled = value != null) {
+                Text(confirmLabel)
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
+private fun TrimInputDialog(
+    name: String,
+    onConfirm: (Long, Long) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var start by remember { mutableStateOf("") }
+    var end by remember { mutableStateOf("") }
+    val s = start.toLongOrNull()
+    val e = end.toLongOrNull()
+    val valid = s != null && e != null && e > s
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("裁剪下载") },
+        text = {
+            Column {
+                Text(
+                    text = "仅下载「$name」选定时间窗（秒），关键帧对齐流拷贝，只拉取窗口字节。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = start,
+                    onValueChange = { new -> start = new.filter { it.isDigit() } },
+                    label = { Text("开始（秒）") },
+                    singleLine = true,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = end,
+                    onValueChange = { new -> end = new.filter { it.isDigit() } },
+                    label = { Text("结束（秒）") },
+                    singleLine = true,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { if (valid) onConfirm(s!!, e!!) }, enabled = valid) {
+                Text("裁剪下载")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
 }

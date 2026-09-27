@@ -9,12 +9,16 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.alliot.osmo.demo.app.di.AppContainer
 import com.alliot.osmo.demo.app.net.CameraApJoiner
+import com.alliot.osmo.demo.app.media.CameraFrameCapture
+import com.alliot.osmo.demo.app.media.CameraTrimmedDownloader
+import com.alliot.osmo.demo.app.media.TrimRange
 import com.alliot.osmo.demo.media.datalink.DatalinkTransport
 import com.alliot.osmo.demo.media.download.DownloadManager
 import com.alliot.osmo.demo.media.download.FileHistoryStore
 import com.alliot.osmo.demo.media.download.HistoryStore
 import com.alliot.osmo.demo.media.download.UrlConnectionHttpClient
 import com.alliot.osmo.demo.media.model.MediaItem
+import com.alliot.osmo.demo.media.exif.EmbeddedJpeg
 import com.alliot.osmo.demo.media.model.MediaStore
 import com.alliot.osmo.demo.media.repo.MediaRepository
 import kotlinx.coroutines.Dispatchers
@@ -29,6 +33,10 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import java.io.ByteArrayOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 
 enum class MediaConnectionState {
     DISCONNECTED,
@@ -62,6 +70,17 @@ data class MediaUiState(
     val wifiPassword: String = "",
     /** The Osmo 360 AP is WPA3-SAE; every other body is WPA2-PSK. */
     val wifiWpa3: Boolean = false,
+    /** Row awaiting a frame-capture offset from the dialog, or null. */
+    val frameCaptureTarget: MediaRow? = null,
+    /** Row awaiting a trim in/out from the dialog, or null. */
+    val trimTarget: MediaRow? = null,
+    /** Paths with a running capture/trim job (buttons disabled while present). */
+    val processing: Set<String> = emptySet(),
+    /**
+     * path -> embedded/served thumbnail JPEG bytes; a null value means "fetched, none
+     * available". A missing key means "not yet requested".
+     */
+    val thumbnails: Map<String, ByteArray?> = emptyMap(),
     val deleteCandidate: MediaRow? = null,
 )
 
@@ -349,6 +368,170 @@ class MediaViewModel(
         }
     }
 
+    // ---- remote frame capture (one full-res frame, no full download) ----
+
+    fun requestFrameCapture(row: MediaRow) {
+        _state.update { it.copy(frameCaptureTarget = row) }
+    }
+
+    fun cancelFrameCapture() {
+        _state.update { it.copy(frameCaptureTarget = null) }
+    }
+
+    /** Decode the frame at [offsetMs] of the pending target video and save it to Pictures/Osmosis. */
+    fun confirmFrameCapture(offsetMs: Long) {
+        val row = _state.value.frameCaptureTarget ?: return
+        val dl = downloader
+        val ip = _state.value.cameraIp.trim()
+        if (dl == null) {
+            _state.update { it.copy(frameCaptureTarget = null, status = "请先连接相机。") }
+            return
+        }
+        val path = row.item.path
+        _state.update {
+            it.copy(
+                frameCaptureTarget = null,
+                processing = it.processing + path,
+                status = "正在从 ${row.item.name} 抽帧 …",
+            )
+        }
+        viewModelScope.launch {
+            val uri = withContext(Dispatchers.IO) {
+                runCatching {
+                    val storage = dl.probe(row.item)?.first ?: row.item.store.index
+                    val mediaPath = dl.mediaUrl(row.item, storage)
+                    CameraFrameCapture(app, { p -> "http://$ip$p" }, {})
+                        .capture(mediaPath, row.item.name.substringBeforeLast('.'), offsetMs)
+                }.getOrNull()
+            }
+            _state.update {
+                it.copy(
+                    processing = it.processing - path,
+                    status = if (uri != null) "已保存抽帧到相册（Pictures/Osmosis）。"
+                    else "抽帧失败：该帧无法解码。",
+                )
+            }
+        }
+    }
+
+    // ---- trimmed download (keyframe-aligned stream copy, fetches only the window) ----
+
+    fun requestTrim(row: MediaRow) {
+        _state.update { it.copy(trimTarget = row) }
+    }
+
+    fun cancelTrim() {
+        _state.update { it.copy(trimTarget = null) }
+    }
+
+    /** Re-mux only [startMs, endMs] of the pending target video into Movies/Osmosis. */
+    fun confirmTrim(startMs: Long, endMs: Long) {
+        val row = _state.value.trimTarget ?: return
+        val dl = downloader
+        val ip = _state.value.cameraIp.trim()
+        if (dl == null) {
+            _state.update { it.copy(trimTarget = null, status = "请先连接相机。") }
+            return
+        }
+        val range = TrimRange(startMs, endMs)
+        if (!range.isValid) {
+            _state.update { it.copy(trimTarget = null, status = "无效区间：结束时间需大于开始时间。") }
+            return
+        }
+        val path = row.item.path
+        _state.update {
+            it.copy(
+                trimTarget = null,
+                processing = it.processing + path,
+                status = "正在裁剪下载 ${row.item.name} …",
+            )
+        }
+        viewModelScope.launch {
+            val uri = withContext(Dispatchers.IO) {
+                runCatching {
+                    val storage = dl.probe(row.item)?.first ?: row.item.store.index
+                    val mediaUrl = "http://$ip" + dl.mediaUrl(row.item, storage)
+                    CameraTrimmedDownloader(app, {})
+                        .trim(mediaUrl, row.item.name.substringBeforeLast('.'), range)
+                }.getOrNull()
+            }
+            _state.update {
+                it.copy(
+                    processing = it.processing - path,
+                    status = if (uri != null) "裁剪完成，已保存到相册（Movies/Osmosis）。"
+                    else "裁剪失败。",
+                )
+            }
+        }
+    }
+
+    // ---- thumbnails (served rendition, else EXIF-embedded for stills) ----
+
+    /**
+     * Lazily fetch [row]'s thumbnail once: a served `thumbPath` rendition when the record
+     * has one, otherwise the EXIF-embedded thumbnail lifted from the first 64 KB of a still
+     * ([EmbeddedJpeg]). Idempotent per path.
+     */
+    fun loadThumbnail(row: MediaRow) {
+        val path = row.item.path
+        if (_state.value.thumbnails.containsKey(path)) return
+        val ip = _state.value.cameraIp.trim()
+        val item = row.item
+        _state.update { it.copy(thumbnails = it.thumbnails + (path to null)) }
+        viewModelScope.launch {
+            val bytes = withContext(Dispatchers.IO) {
+                runCatching { fetchThumbnail(ip, item) }.getOrNull()
+            }
+            if (bytes != null) {
+                _state.update { it.copy(thumbnails = it.thumbnails + (path to bytes)) }
+            }
+        }
+    }
+
+    private fun fetchThumbnail(ip: String, item: MediaItem): ByteArray? {
+        val dl = downloader ?: return null
+        val storage = dl.probe(item)?.first ?: item.store.index
+        if (item.thumbPath.isNotBlank()) {
+            val url = "/v2?storage=$storage&path=" + URLEncoder.encode(item.thumbPath, Charsets.UTF_8)
+            httpGetCapped(ip, url, Long.MAX_VALUE)?.takeIf { it.isNotEmpty() }?.let { return it }
+        }
+        if (!item.isVideo) {
+            val head = httpGetCapped(ip, dl.mediaUrl(item, storage), EmbeddedJpeg.HEAD_BYTES.toLong())
+                ?: return null
+            return EmbeddedJpeg.fromHeader(head)
+        }
+        return null
+    }
+
+    /** GET at most [maxBytes] of a camera path (Range-capped), or null on any error. */
+    private fun httpGetCapped(ip: String, path: String, maxBytes: Long): ByteArray? {
+        val conn = (URL("http://$ip$path").openConnection() as HttpURLConnection).apply {
+            connectTimeout = 5_000
+            readTimeout = 15_000
+            if (maxBytes in 1 until Long.MAX_VALUE) setRequestProperty("Range", "bytes=0-${maxBytes - 1}")
+        }
+        return try {
+            if (conn.responseCode !in 200..299) return null
+            conn.inputStream.use { input ->
+                val out = ByteArrayOutputStream()
+                val buf = ByteArray(8_192)
+                var total = 0L
+                while (true) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    out.write(buf, 0, n)
+                    total += n
+                    if (maxBytes != Long.MAX_VALUE && total >= maxBytes) break
+                }
+                out.toByteArray()
+            }
+        } catch (_: Exception) {
+            null
+        } finally {
+            conn.disconnect()
+        }
+    }
+
     fun requestDelete(row: MediaRow) {
         _state.update { it.copy(deleteCandidate = row) }
     }
@@ -413,6 +596,8 @@ class MediaViewModel(
                     sdItems = emptyList(),
                     internalItems = emptyList(),
                     downloadProgress = emptyMap(),
+                    thumbnails = emptyMap(),
+                    processing = emptySet(),
                     status = "已断开。",
                 )
             }
