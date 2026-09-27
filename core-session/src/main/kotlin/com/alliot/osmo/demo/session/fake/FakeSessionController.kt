@@ -231,6 +231,22 @@ class FakeSessionController : SessionController {
         _cameraStatus.value = _cameraStatus.value.copy(powerMode = 0, detail = "Awake")
     }
 
+    override suspend fun wakeViaGatt() {
+        FakeCameraScript.gattWakeScriptFrames().forEach { frameBytes ->
+            appendLog(LogCategory.TX, "Fake GATT wake frame sent.", frameBytes.joinToString(" ") { "%02X".format(it) })
+        }
+        appendLog(
+            LogCategory.RX,
+            "Fake GATT wake reply received.",
+            FakeCameraScript.gattWakeReplyPayload.joinToString(" ") { "%02X".format(it) },
+        )
+        _status.value = _status.value.copy(
+            sleeping = false,
+            lastWakeResult = "OK: fake GATT wake completed",
+        )
+        _cameraStatus.value = _cameraStatus.value.copy(powerMode = 0, detail = "Awake via GATT wake")
+    }
+
     override suspend fun wakeAndSnapshot() {
         if (_status.value.protocolReady && !_status.value.sleeping) {
             reportRecordKeyClick()

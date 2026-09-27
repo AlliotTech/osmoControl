@@ -812,7 +812,7 @@ class BleSessionControllerTest {
     }
 }
 
-private class FakeBleClient(
+internal class FakeBleClient(
     private val localAdapterAddress: String = randomMacAddress(),
 ) : BleClient {
     private val _scanResults = MutableStateFlow(

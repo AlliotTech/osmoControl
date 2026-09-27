@@ -35,6 +35,33 @@ data class GimbalTelemetryPayload(
     val tail: ByteArray = ByteArray(0),
 ) : DumlPayload
 
+data class WifiCredentialPayload(
+    val status: Int,
+    val value: String,
+) : DumlPayload
+
+data class WifiConnectPayload(
+    val ssid: String,
+    val password: String,
+) : DumlPayload
+
+/** Active-store status from the unprompted `0x02/0x80` push (all values MiB). */
+data class ActiveStoreStatusPayload(
+    val flags: Long,
+    val inPlayback: Boolean,
+    val totalMb: Long,
+    val freeMb: Long,
+) : DumlPayload
+
+/** Per-store capacities from the unprompted `0x02/0xDC` push (all values MiB). */
+data class StoresStatusPayload(
+    val storeCount: Int,
+    val sdTotalMb: Long,
+    val sdFreeMb: Long,
+    val internalTotalMb: Long?,
+    val internalFreeMb: Long?,
+) : DumlPayload
+
 data class RawDumlPayload(
     val bytes: ByteArray,
 ) : DumlPayload

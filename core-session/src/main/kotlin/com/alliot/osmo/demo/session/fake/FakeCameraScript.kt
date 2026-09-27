@@ -1,5 +1,7 @@
 package com.alliot.osmo.demo.session.fake
 
+import com.alliot.osmo.demo.protocol.duml.DumlFrameCodec
+import com.alliot.osmo.demo.protocol.duml.GattWakeSequence
 import com.alliot.osmo.demo.session.model.CameraStatusSnapshot
 import com.alliot.osmo.demo.session.model.SessionDevice
 
@@ -22,4 +24,22 @@ object FakeCameraScript {
             lastPushSummary = "Fake status initialized",
         )
     }
+
+    /** Scripted DUML GATT wake sequence the fake camera pretends to receive. */
+    fun gattWakeScriptFrames(pairingIdentifier: String = "fake-pairing-identifier-00000001"): List<ByteArray> {
+        var messageId = 0
+        fun nextId(): Int {
+            messageId += 1
+            return messageId
+        }
+        return listOf(
+            DumlFrameCodec.encode(GattWakeSequence.buildSessionOpenFrame(nextId())),
+            DumlFrameCodec.encode(GattWakeSequence.buildSetPairingPinFrame(nextId(), pairingIdentifier)),
+            DumlFrameCodec.encode(GattWakeSequence.buildSessionKeepaliveFrame(nextId())),
+            DumlFrameCodec.encode(GattWakeSequence.buildWakeCameraFrame(nextId())),
+        )
+    }
+
+    /** Camera-side wake reply: 0x53/0x10 payload 01 00 00 00. */
+    val gattWakeReplyPayload: ByteArray = byteArrayOf(0x01, 0x00, 0x00, 0x00)
 }

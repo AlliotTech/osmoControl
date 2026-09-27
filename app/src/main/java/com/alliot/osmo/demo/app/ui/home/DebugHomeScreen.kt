@@ -70,6 +70,7 @@ fun DebugHomeScreen(
                 onSubscribe = viewModel::subscribeStatus,
                 onSleep = viewModel::sleep,
                 onWake = viewModel::wake,
+                onWakeViaGatt = viewModel::wakeViaGatt,
                 onWakeAndSnapshot = viewModel::wakeAndSnapshot,
                 onRecordKeyClick = viewModel::sendRecordKeyClick,
                 onQsKeyClick = viewModel::sendQsKeyClick,

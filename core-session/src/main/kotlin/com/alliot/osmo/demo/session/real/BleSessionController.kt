@@ -6,6 +6,10 @@ import com.alliot.osmo.demo.ble.BleScanResult
 import com.alliot.osmo.demo.ble.WakeAdvertisingPayload
 import com.alliot.osmo.demo.protocol.payload.AckPayload
 import com.alliot.osmo.demo.protocol.payload.CameraConnectionConfirmationPayload
+import com.alliot.osmo.demo.protocol.duml.DumlConstants
+import com.alliot.osmo.demo.protocol.duml.DumlFrame
+import com.alliot.osmo.demo.protocol.duml.DumlFrameCodec
+import com.alliot.osmo.demo.protocol.duml.GattWakeSequence
 import com.alliot.osmo.demo.protocol.frame.DjiFrame
 import com.alliot.osmo.demo.protocol.frame.DjiFrameCodec
 import com.alliot.osmo.demo.protocol.payload.CameraModeSwitchPayload
@@ -36,16 +40,19 @@ import com.alliot.osmo.demo.session.model.SessionStatus
 import com.alliot.osmo.demo.session.model.SessionTransportMode
 import com.alliot.osmo.demo.session.model.inferSessionDevice
 import com.alliot.osmo.demo.session.model.resolveConnectedProfile
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.time.OffsetDateTime
 import kotlin.math.cos
 import kotlin.math.sin
@@ -62,6 +69,11 @@ class BleSessionController(
     private val statusWatchdogPollIntervalMs: Long = STATUS_WATCHDOG_POLL_INTERVAL_MS,
     private val statusPushIdleTimeoutMs: Long = STATUS_PUSH_IDLE_TIMEOUT_MS,
     private val statusProbeTimeoutMs: Long = STATUS_PROBE_TIMEOUT_MS,
+    private val pairingIdentifierProvider: () -> String = { defaultPairingIdentifier(controllerDeviceId) },
+    private val wakeWriteSpacingMs: Long = GATT_WAKE_WRITE_SPACING_MS,
+    private val wakeReplyTimeoutMs: Long = GATT_WAKE_REPLY_TIMEOUT_MS,
+    private val wakeMaxAttempts: Int = GATT_WAKE_MAX_ATTEMPTS,
+    private val wakeBackoffBaseMs: Long = GATT_WAKE_BACKOFF_BASE_MS,
 ) : SessionController {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -92,6 +104,9 @@ class BleSessionController(
     private val pendingCommands = linkedMapOf<CommandKey, PendingCommand>()
     private var oa5NoiseHintShown = false
     private var protocolRxBuffer = ByteArray(0)
+    private var dumlRxBuffer = ByteArray(0)
+    private var dumlMessageId = 0
+    private var wakeReplyDeferred: CompletableDeferred<Unit>? = null
     private var localControllerMac = DEFAULT_CONTROLLER_MAC
     private val rejectedDevicesInCurrentScan = mutableSetOf<String>()
     private var preserveRejectedStateOnDisconnect = false
@@ -449,6 +464,107 @@ class BleSessionController(
         }
     }
 
+    override suspend fun wakeViaGatt() {
+        wakeObservationJob?.cancel()
+        val device = _status.value.connectedDevice
+        if (device == null) {
+            val message = "GATT wake needs a known camera; scan and pick a device first."
+            _status.value = _status.value.copy(latestError = message)
+            appendLog(LogCategory.ERROR, message)
+            return
+        }
+        _status.value = _status.value.copy(
+            lastWakeResult = GATT_WAKE_PENDING_RESULT,
+            latestError = null,
+        )
+        appendLog(LogCategory.BLE, "GATT wake started for ${device.macAddress}.")
+
+        var attempt = 0
+        var woke = false
+        while (attempt < wakeMaxAttempts && !woke) {
+            attempt += 1
+            woke = runGattWakeAttempt(device, attempt)
+            if (!woke && attempt < wakeMaxAttempts) {
+                val backoffMs = wakeBackoffBaseMs * (1L shl (attempt - 1))
+                appendLog(LogCategory.BLE, "GATT wake attempt $attempt/$wakeMaxAttempts failed; retrying in ${backoffMs}ms.")
+                delay(backoffMs)
+            }
+        }
+
+        if (woke) {
+            _status.value = _status.value.copy(
+                sleeping = false,
+                lastWakeResult = "GATT wake OK: camera answered the wake command",
+            )
+            _cameraStatus.value = _cameraStatus.value.copy(
+                powerMode = 0,
+                powerModeLabel = "Awake",
+                detail = "Awake via GATT wake",
+            )
+            appendLog(LogCategory.STATE, "GATT wake succeeded on attempt $attempt/$wakeMaxAttempts.")
+        } else {
+            _status.value = _status.value.copy(
+                lastWakeResult = "GATT wake failed after $wakeMaxAttempts attempts; falling back to advertising wake",
+            )
+            appendLog(LogCategory.ERROR, "GATT wake failed; falling back to advertising wake.")
+            wake()
+        }
+    }
+
+    private suspend fun runGattWakeAttempt(device: SessionDevice, attempt: Int): Boolean {
+        if (!bleClient.connectionState.value.isConnected) {
+            appendLog(LogCategory.BLE, "GATT wake attempt $attempt: connecting to ${device.macAddress}.")
+            val connected = runCatching { bleClient.connect(device.macAddress) }.isSuccess &&
+                bleClient.connectionState.value.isConnected
+            if (!connected) {
+                appendLog(LogCategory.ERROR, "GATT wake attempt $attempt: GATT connect failed.")
+                return false
+            }
+        }
+        val waiter = CompletableDeferred<Unit>()
+        wakeReplyDeferred = waiter
+        val keepaliveJob = scope.launch {
+            while (isActive) {
+                delay(GATT_WAKE_KEEPALIVE_INTERVAL_MS)
+                runCatching { writeDuml(GattWakeSequence.buildSessionKeepaliveFrame(nextDumlMessageId())) }
+            }
+        }
+        return try {
+            writeDuml(GattWakeSequence.buildSessionOpenFrame(nextDumlMessageId()))
+            delay(wakeWriteSpacingMs)
+            writeDuml(GattWakeSequence.buildSetPairingPinFrame(nextDumlMessageId(), pairingIdentifierProvider()))
+            delay(wakeWriteSpacingMs)
+            writeDuml(GattWakeSequence.buildSessionKeepaliveFrame(nextDumlMessageId()))
+            delay(wakeWriteSpacingMs)
+            writeDuml(GattWakeSequence.buildWakeCameraFrame(nextDumlMessageId()))
+            appendLog(LogCategory.BLE, "GATT wake attempt $attempt: sequence sent; waiting for wake reply.")
+            withTimeoutOrNull(wakeReplyTimeoutMs) {
+                waiter.await()
+                true
+            } ?: false
+        } finally {
+            keepaliveJob.cancel()
+            if (wakeReplyDeferred === waiter) {
+                wakeReplyDeferred = null
+            }
+        }
+    }
+
+    private suspend fun writeDuml(frame: DumlFrame) {
+        val bytes = DumlFrameCodec.encode(frame)
+        bleClient.write(bytes)
+        appendLog(
+            LogCategory.TX,
+            "DUML 0x${frame.cmdSet.toString(16)}:0x${frame.cmdId.toString(16)} sent.",
+            bytes.joinToString(" ") { "%02X".format(it) },
+        )
+    }
+
+    private fun nextDumlMessageId(): Int {
+        dumlMessageId = (dumlMessageId + 1) and 0xFFFF
+        return dumlMessageId
+    }
+
     override suspend fun wakeAndSnapshot() {
         if (_status.value.protocolReady && !_status.value.sleeping) {
             reportRecordKeyClick()
@@ -731,12 +847,11 @@ class BleSessionController(
 
     private suspend fun handleNotification(bytes: ByteArray) {
         if (bytes.isEmpty()) return
-        if (bytes[0] == 0x55.toByte()) {
-            protocolRxBuffer = ByteArray(0)
-            if (!oa5NoiseHintShown) {
-                oa5NoiseHintShown = true
-                appendLog(LogCategory.BLE, "OA5 background notify detected; non-protocol 0x55 frames will be ignored.")
-            }
+        if (bytes[0] == 0x55.toByte() || dumlRxBuffer.isNotEmpty()) {
+            // A pending DUML fragment means this chunk is a continuation
+            // even when it no longer starts with 0x55.
+            if (bytes[0] == 0x55.toByte()) protocolRxBuffer = ByteArray(0)
+            handleDumlNotification(bytes)
             return
         }
         if (bytes[0] != 0xAA.toByte() && protocolRxBuffer.isEmpty()) {
@@ -745,6 +860,41 @@ class BleSessionController(
         }
         protocolRxBuffer += bytes
         drainProtocolFrames()
+    }
+
+    private suspend fun handleDumlNotification(bytes: ByteArray) {
+        dumlRxBuffer += bytes
+        while (dumlRxBuffer.size >= DumlConstants.MIN_FRAME_SIZE) {
+            if (dumlRxBuffer[0] != 0x55.toByte()) {
+                dumlRxBuffer = dumlRxBuffer.drop(1).toByteArray()
+                continue
+            }
+            val totalLength = (dumlRxBuffer[1].toInt() and 0xFF) or ((dumlRxBuffer[2].toInt() and 0x03) shl 8)
+            if (totalLength < DumlConstants.MIN_FRAME_SIZE) {
+                dumlRxBuffer = dumlRxBuffer.drop(1).toByteArray()
+                continue
+            }
+            if (dumlRxBuffer.size < totalLength) return
+            val frameBytes = dumlRxBuffer.copyOfRange(0, totalLength)
+            dumlRxBuffer = dumlRxBuffer.copyOfRange(totalLength, dumlRxBuffer.size)
+            val decoded = runCatching { DumlFrameCodec.decode(frameBytes) }
+            if (decoded.isFailure) {
+                if (!oa5NoiseHintShown) {
+                    oa5NoiseHintShown = true
+                    appendLog(LogCategory.BLE, "OA5 background notify detected; undecodable 0x55 frames will be ignored.")
+                }
+                continue
+            }
+            val frame = decoded.getOrThrow()
+            appendLog(
+                LogCategory.RX,
+                "DUML frame 0x${frame.cmdSet.toString(16)}:0x${frame.cmdId.toString(16)} received.",
+                frameBytes.joinToString(" ") { "%02X".format(it) },
+            )
+            if (GattWakeSequence.isWakeReply(frame)) {
+                wakeReplyDeferred?.complete(Unit)
+            }
+        }
     }
 
     private suspend fun drainProtocolFrames() {
@@ -1467,6 +1617,15 @@ class BleSessionController(
         private const val STATUS_PROBE_TIMEOUT_MS = 1_500L
         private const val WAKE_PENDING_RESULT = "Advertising sent; waiting for wake event"
         private const val WAKE_DISCONNECT_RESULT = "Wake observed: BLE disconnected, waiting to reconnect"
+        private const val GATT_WAKE_WRITE_SPACING_MS = 200L
+        private const val GATT_WAKE_KEEPALIVE_INTERVAL_MS = 1_000L
+        private const val GATT_WAKE_REPLY_TIMEOUT_MS = 2_500L
+        private const val GATT_WAKE_MAX_ATTEMPTS = 3
+        private const val GATT_WAKE_BACKOFF_BASE_MS = 500L
+        private const val GATT_WAKE_PENDING_RESULT = "GATT wake sent; waiting for camera reply"
+
+        private fun defaultPairingIdentifier(deviceId: Long): String =
+            deviceId.toString(16).padStart(8, '0').repeat(4)
         private const val KEY_REPORT_MODE_EVENT = 0x01
         private const val KEY_REPORT_VALUE_SINGLE_CLICK = 0x00
         private const val KEY_CODE_RECORD = 0x01
