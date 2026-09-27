@@ -576,7 +576,7 @@ class AndroidBleClient(
 
     private companion object {
         private const val TAG = "OsmoBle"
-        private const val REQUEST_MTU = 517 // match osmosis GattClient.kt (working code)
+        private const val REQUEST_MTU = 500 // 517 makes Pocket 3 disconnect (status=22) on wake
         private val REMOTE_SERVICE_UUID: UUID = uuid16(0xFFF0)
         private val REMOTE_NOTIFY_UUID: UUID = uuid16(0xFFF4)
         private val REMOTE_WRITE_UUID: UUID = uuid16(0xFFF5)

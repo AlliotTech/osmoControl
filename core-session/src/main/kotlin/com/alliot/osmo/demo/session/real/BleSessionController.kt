@@ -1701,7 +1701,7 @@ class BleSessionController(
         private const val STATUS_PROBE_TIMEOUT_MS = 1_500L
         private const val WAKE_PENDING_RESULT = "Advertising sent; waiting for wake event"
         private const val WAKE_DISCONNECT_RESULT = "Wake observed: BLE disconnected, waiting to reconnect"
-        private const val GATT_WAKE_WRITE_SPACING_MS = 200L
+        private const val GATT_WAKE_WRITE_SPACING_MS = 1_500L
         private const val GATT_WAKE_KEEPALIVE_INTERVAL_MS = 1_000L
         private const val GATT_WAKE_REPLY_TIMEOUT_MS = 2_500L
         private const val GATT_WAKE_PAIRING_TIMEOUT_MS = 30_000L
