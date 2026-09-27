@@ -71,6 +71,82 @@ class GattWakeSequenceTest {
         assertFalse(GattWakeSequence.isWakeReply(DumlFrameCodec.decode(DumlFrameCodec.encode(wrongCommand))))
     }
 
+    @Test
+    fun pairing_status_detection() {
+        val paired = DumlFrame(
+            target = 0x0207,
+            messageId = 9,
+            flags = DumlFlags.RESPONSE,
+            cmdSet = DumlCmdSet.WIFI,
+            cmdId = DumlWifiCmd.SET_PAIRING_PIN,
+            payload = byteArrayOf(0x00, 0x01),
+        )
+        val decoded = DumlFrameCodec.decode(DumlFrameCodec.encode(paired))
+        assertTrue(GattWakeSequence.isPairingStatusFrame(decoded))
+        assertEquals(GattWakeSequence.PAIR_STATUS_ALREADY_PAIRED, GattWakeSequence.pairingStatus(decoded))
+
+        val approvalNeeded = paired.copy(payload = byteArrayOf(0x00, 0x02))
+        val decodedApproval = DumlFrameCodec.decode(DumlFrameCodec.encode(approvalNeeded))
+        assertTrue(GattWakeSequence.isPairingStatusFrame(decodedApproval))
+        assertEquals(GattWakeSequence.PAIR_STATUS_APPROVAL_REQUIRED, GattWakeSequence.pairingStatus(decodedApproval))
+
+        // A 0x07/0x45 *request* is not a status reply.
+        val request = paired.copy(flags = DumlFlags.REQUEST)
+        assertFalse(GattWakeSequence.isPairingStatusFrame(DumlFrameCodec.decode(DumlFrameCodec.encode(request))))
+    }
+
+    @Test
+    fun pairing_approval_detection() {
+        val approvalRequest = DumlFrame(
+            target = 0x02F0,
+            messageId = 11,
+            flags = DumlFlags.REQUEST,
+            cmdSet = DumlCmdSet.WIFI,
+            cmdId = DumlWifiCmd.PAIRING_APPROVED,
+            payload = byteArrayOf(0x01),
+        )
+        assertTrue(GattWakeSequence.isPairingApprovalFrame(DumlFrameCodec.decode(DumlFrameCodec.encode(approvalRequest))))
+    }
+
+    @Test
+    fun ack_frame_swaps_target_and_echoes_id() {
+        val request = DumlFrame(
+            target = 0x02F0, // camera(0xF0) -> app(0x02)
+            messageId = 0x1234,
+            flags = DumlFlags.REQUEST,
+            cmdSet = DumlCmdSet.WIFI,
+            cmdId = DumlWifiCmd.PAIRING_APPROVED,
+            payload = byteArrayOf(0x01),
+        )
+        val ack = GattWakeSequence.buildAckFrame(DumlFrameCodec.decode(DumlFrameCodec.encode(request)))
+        assertEquals(0xF002, ack.target) // app -> camera session endpoint
+        assertEquals(0x1234, ack.messageId)
+        assertEquals(DumlFlags.RESPONSE, ack.flags)
+        assertEquals(DumlCmdSet.WIFI, ack.cmdSet)
+        assertEquals(DumlWifiCmd.PAIRING_APPROVED, ack.cmdId)
+        assertArrayEquals(byteArrayOf(0x00), ack.payload)
+    }
+
+    @Test
+    fun ack_frame_answers_device_info_request() {
+        val request = DumlFrame(
+            target = 0x02F0,
+            messageId = 0x2222,
+            flags = DumlFlags.REQUEST,
+            cmdSet = DumlCmdSet.GENERAL,
+            cmdId = 0x81,
+            payload = ByteArray(0),
+        )
+        val decoded = DumlFrameCodec.decode(DumlFrameCodec.encode(request))
+        assertTrue(GattWakeSequence.isDeviceInfoRequest(decoded))
+        val ack = GattWakeSequence.buildAckFrame(decoded)
+        assertEquals(DumlFlags.RESPONSE, ack.flags)
+        val info = GattWakeSequence.appDeviceInfoPayload()
+        assertEquals(62, info.size)
+        assertArrayEquals(byteArrayOf(0x00, 0x41, 0x50, 0x50), info.copyOfRange(0, 4))
+        assertArrayEquals(info, ack.payload)
+    }
+
     private fun hex(value: String): ByteArray {
         require(value.length % 2 == 0) { "Hex string must have even length." }
         return ByteArray(value.length / 2) { index ->
