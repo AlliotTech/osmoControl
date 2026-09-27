@@ -7,6 +7,7 @@ import com.alliot.osmo.demo.ble.WakeAdvertisingPayload
 import com.alliot.osmo.demo.protocol.payload.AckPayload
 import com.alliot.osmo.demo.protocol.payload.CameraConnectionConfirmationPayload
 import com.alliot.osmo.demo.protocol.duml.DumlConstants
+import com.alliot.osmo.demo.protocol.duml.DumlFlags
 import com.alliot.osmo.demo.protocol.duml.DumlFrame
 import com.alliot.osmo.demo.protocol.duml.DumlFrameCodec
 import com.alliot.osmo.demo.protocol.duml.GattWakeSequence
@@ -72,6 +73,7 @@ class BleSessionController(
     private val pairingIdentifierProvider: () -> String = { defaultPairingIdentifier(controllerDeviceId) },
     private val wakeWriteSpacingMs: Long = GATT_WAKE_WRITE_SPACING_MS,
     private val wakeReplyTimeoutMs: Long = GATT_WAKE_REPLY_TIMEOUT_MS,
+    private val pairingTimeoutMs: Long = GATT_WAKE_PAIRING_TIMEOUT_MS,
     private val wakeMaxAttempts: Int = GATT_WAKE_MAX_ATTEMPTS,
     private val wakeBackoffBaseMs: Long = GATT_WAKE_BACKOFF_BASE_MS,
 ) : SessionController {
@@ -107,6 +109,7 @@ class BleSessionController(
     private var dumlRxBuffer = ByteArray(0)
     private var dumlMessageId = 0
     private var wakeReplyDeferred: CompletableDeferred<Unit>? = null
+    private var pairingResultDeferred: CompletableDeferred<Int>? = null
     private var localControllerMac = DEFAULT_CONTROLLER_MAC
     private val rejectedDevicesInCurrentScan = mutableSetOf<String>()
     private var preserveRejectedStateOnDisconnect = false
@@ -209,6 +212,10 @@ class BleSessionController(
             latestError = null,
         )
         bleClient.connect(device.macAddress)
+        // connect() returning means the transport is up (the real client suspends
+        // until GATT connects); record it directly so a fast drop can't slip past
+        // the state collector through StateFlow conflation.
+        lastTransportConnected = true
         appendLog(
             LogCategory.STATE,
             "Handshake identity device_id=0x${controllerDeviceId.toString(16)} mac=${formatMac(localControllerMac)} verify_mode=${_status.value.handshakeVerifyMode} verify_code=${verifyCode.toString().padStart(4, '0')}",
@@ -240,6 +247,7 @@ class BleSessionController(
         stopAutoGpsPush()
         postConnectBootstrapStarted = false
         bleClient.disconnect()
+        lastTransportConnected = false
         _status.value = SessionStatus(
             mode = SessionTransportMode.REAL,
             controllerDeviceId = controllerDeviceId,
@@ -520,30 +528,51 @@ class BleSessionController(
                 appendLog(LogCategory.ERROR, "GATT wake attempt $attempt: GATT connect failed.")
                 return false
             }
+            lastTransportConnected = true
         }
+        val pairingWaiter = CompletableDeferred<Int>()
+        pairingResultDeferred = pairingWaiter
         val waiter = CompletableDeferred<Unit>()
         wakeReplyDeferred = waiter
-        val keepaliveJob = scope.launch {
-            while (isActive) {
-                delay(GATT_WAKE_KEEPALIVE_INTERVAL_MS)
-                runCatching { writeDuml(GattWakeSequence.buildSessionKeepaliveFrame(nextDumlMessageId())) }
-            }
-        }
         return try {
+            // Mimo order (HCI snoop): session open first, pairing a beat later.
             writeDuml(GattWakeSequence.buildSessionOpenFrame(nextDumlMessageId()))
             delay(wakeWriteSpacingMs)
             writeDuml(GattWakeSequence.buildSetPairingPinFrame(nextDumlMessageId(), pairingIdentifierProvider()))
-            delay(wakeWriteSpacingMs)
-            writeDuml(GattWakeSequence.buildSessionKeepaliveFrame(nextDumlMessageId()))
-            delay(wakeWriteSpacingMs)
-            writeDuml(GattWakeSequence.buildWakeCameraFrame(nextDumlMessageId()))
-            appendLog(LogCategory.BLE, "GATT wake attempt $attempt: sequence sent; waiting for wake reply.")
-            withTimeoutOrNull(wakeReplyTimeoutMs) {
-                waiter.await()
-                true
-            } ?: false
+            appendLog(LogCategory.BLE, "GATT wake attempt $attempt: pairing sent; waiting for camera.")
+            val pairStatus = withTimeoutOrNull(pairingTimeoutMs) {
+                pairingWaiter.await()
+            }
+            if (pairStatus == null) {
+                appendLog(LogCategory.ERROR, "GATT wake attempt $attempt: pairing timed out (no 0x07/0x45 reply).")
+                return false
+            }
+            if (pairStatus != GattWakeSequence.PAIR_STATUS_ALREADY_PAIRED) {
+                appendLog(LogCategory.ERROR, "GATT wake attempt $attempt: pairing not approved (status=0x${pairStatus.toString(16)}).")
+                return false
+            }
+            // Pairing confirmed — start the ~1Hz keepalive, then send the wake.
+            val keepaliveJob = scope.launch {
+                while (isActive) {
+                    delay(GATT_WAKE_KEEPALIVE_INTERVAL_MS)
+                    runCatching { writeDuml(GattWakeSequence.buildSessionKeepaliveFrame(nextDumlMessageId())) }
+                }
+            }
+            try {
+                delay(wakeWriteSpacingMs)
+                writeDuml(GattWakeSequence.buildWakeCameraFrame(nextDumlMessageId()))
+                appendLog(LogCategory.BLE, "GATT wake attempt $attempt: wake sent; waiting for wake reply.")
+                withTimeoutOrNull(wakeReplyTimeoutMs) {
+                    waiter.await()
+                    true
+                } ?: false
+            } finally {
+                keepaliveJob.cancel()
+            }
         } finally {
-            keepaliveJob.cancel()
+            if (pairingResultDeferred === pairingWaiter) {
+                pairingResultDeferred = null
+            }
             if (wakeReplyDeferred === waiter) {
                 wakeReplyDeferred = null
             }
@@ -893,6 +922,42 @@ class BleSessionController(
             )
             if (GattWakeSequence.isWakeReply(frame)) {
                 wakeReplyDeferred?.complete(Unit)
+            }
+            if (GattWakeSequence.isPairingStatusFrame(frame)) {
+                val status = GattWakeSequence.pairingStatus(frame)
+                val meaning = when (status) {
+                    GattWakeSequence.PAIR_STATUS_ALREADY_PAIRED -> "already paired"
+                    GattWakeSequence.PAIR_STATUS_APPROVAL_REQUIRED -> "approval required — confirm pairing on the camera"
+                    else -> "status=0x${status.toString(16)}"
+                }
+                appendLog(LogCategory.BLE, "Pairing status: $meaning.")
+                if (status == GattWakeSequence.PAIR_STATUS_APPROVAL_REQUIRED) {
+                    // Approval arrives later as a 0x07/0x46 request; keep waiting for it.
+                    _status.value = _status.value.copy(
+                        lastWakeResult = "请在相机屏幕上确认配对",
+                    )
+                } else {
+                    pairingResultDeferred?.complete(status)
+                }
+            }
+            if (GattWakeSequence.isPairingApprovalFrame(frame)) {
+                appendLog(LogCategory.BLE, "Pairing approved by camera.")
+                pairingResultDeferred?.complete(GattWakeSequence.PAIR_STATUS_ALREADY_PAIRED)
+            }
+            if (frame.flags == DumlFlags.REQUEST) {
+                // The camera drops the link (~6s) when its requests go unanswered.
+                runCatching {
+                    val ack = GattWakeSequence.buildAckFrame(frame)
+                    val bytes = DumlFrameCodec.encode(ack)
+                    bleClient.write(bytes)
+                    appendLog(
+                        LogCategory.TX,
+                        "ACK 0x${frame.cmdSet.toString(16)}:0x${frame.cmdId.toString(16)} sent.",
+                        bytes.joinToString(" ") { "%02X".format(it) },
+                    )
+                }.onFailure { error ->
+                    appendLog(LogCategory.ERROR, "Failed to ACK 0x${frame.cmdSet.toString(16)}:0x${frame.cmdId.toString(16)}: ${error.message}")
+                }
             }
         }
     }
@@ -1620,6 +1685,7 @@ class BleSessionController(
         private const val GATT_WAKE_WRITE_SPACING_MS = 200L
         private const val GATT_WAKE_KEEPALIVE_INTERVAL_MS = 1_000L
         private const val GATT_WAKE_REPLY_TIMEOUT_MS = 2_500L
+        private const val GATT_WAKE_PAIRING_TIMEOUT_MS = 30_000L
         private const val GATT_WAKE_MAX_ATTEMPTS = 3
         private const val GATT_WAKE_BACKOFF_BASE_MS = 500L
         private const val GATT_WAKE_PENDING_RESULT = "GATT wake sent; waiting for camera reply"

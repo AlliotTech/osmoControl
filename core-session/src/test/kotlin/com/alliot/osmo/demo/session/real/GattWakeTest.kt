@@ -6,6 +6,7 @@ import com.alliot.osmo.demo.protocol.duml.DumlFlags
 import com.alliot.osmo.demo.protocol.duml.DumlFrame
 import com.alliot.osmo.demo.protocol.duml.DumlFrameCodec
 import com.alliot.osmo.demo.protocol.duml.DumlWakeCmd
+import com.alliot.osmo.demo.protocol.duml.DumlWifiCmd
 import com.alliot.osmo.demo.session.model.SessionDevice
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -69,6 +70,75 @@ class GattWakeTest {
     }
 
     @Test
+    fun gatt_wake_waits_for_camera_approval_then_succeeds() = runBlocking {
+        val bleClient = FakeBleClient(autoPairingStatus = 0x02)
+        val controller = BleSessionController(
+            bleClient,
+            wakeWriteSpacingMs = 10,
+            wakeReplyTimeoutMs = 2_000,
+            pairingTimeoutMs = 5_000,
+            wakeBackoffBaseMs = 10,
+        )
+        val device = SessionDevice("Osmo Action 5 Pro", "AA:BB:CC:DD:EE:01", 0xFF44)
+
+        controller.connect(device)
+        val wakeJob = launch { controller.wakeViaGatt() }
+
+        // Camera asks for on-camera approval; the wake command must wait for it.
+        waitUntil(timeoutMs = 2_000) {
+            controller.status.value.lastWakeResult?.contains("请在相机屏幕上确认配对") == true
+        }
+        assertTrue(wakeCommandWrites(bleClient).isEmpty())
+
+        // User approves on the camera: 0x07/0x46 request, then the wake reply.
+        bleClient.emitNotification(pairingApprovalFrame())
+        waitUntil(timeoutMs = 2_000) { wakeCommandWrites(bleClient).isNotEmpty() }
+        assertTrue(
+            "expected the 0x07/0x46 approval request to be ACKed",
+            bleClient.writes.any { bytes ->
+                runCatching { DumlFrameCodec.decode(bytes) }
+                    .map { decoded: DumlDecodedFrame ->
+                        decoded.cmdSet == DumlCmdSet.WIFI &&
+                            decoded.cmdId == DumlWifiCmd.PAIRING_APPROVED &&
+                            decoded.flags == DumlFlags.RESPONSE &&
+                            decoded.payload.contentEquals(byteArrayOf(0x00))
+                    }
+                    .getOrDefault(false)
+            },
+        )
+        bleClient.emitNotification(wakeReplyFrame())
+        wakeJob.join()
+
+        assertTrue(
+            "expected GATT wake success, got: ${controller.status.value.lastWakeResult}",
+            controller.status.value.lastWakeResult?.contains("GATT wake OK") == true,
+        )
+    }
+
+    @Test
+    fun gatt_wake_fails_when_pairing_never_answers() = runBlocking {
+        val bleClient = FakeBleClient(autoPairingStatus = null)
+        val controller = BleSessionController(
+            bleClient,
+            wakeWriteSpacingMs = 10,
+            wakeReplyTimeoutMs = 300,
+            pairingTimeoutMs = 300,
+            wakeBackoffBaseMs = 10,
+            wakeMaxAttempts = 1,
+        )
+        val device = SessionDevice("Osmo Action 5 Pro", "AA:BB:CC:DD:EE:01", 0xFF44)
+
+        controller.connect(device)
+        controller.wakeViaGatt()
+
+        assertTrue(wakeCommandWrites(bleClient).isEmpty())
+        assertEquals(
+            "Advertising sent; waiting for wake event",
+            controller.status.value.lastWakeResult,
+        )
+    }
+
+    @Test
     fun gatt_wake_requires_known_device() = runBlocking {
         val bleClient = FakeBleClient()
         val controller = BleSessionController(bleClient)
@@ -91,6 +161,19 @@ class GattWakeTest {
                     }
                     .getOrDefault(false)
         }
+    }
+
+    private fun pairingApprovalFrame(): ByteArray {
+        return DumlFrameCodec.encode(
+            DumlFrame(
+                target = 0x02F0,
+                messageId = 2,
+                flags = DumlFlags.REQUEST,
+                cmdSet = DumlCmdSet.WIFI,
+                cmdId = DumlWifiCmd.PAIRING_APPROVED,
+                payload = byteArrayOf(0x01),
+            ),
+        )
     }
 
     private fun wakeReplyFrame(): ByteArray {
