@@ -22,6 +22,7 @@ include(
     ":core-protocol",
     ":core-ble",
     ":core-session",
+    ":core-media",
     ":feature-control",
     ":feature-gps",
     ":feature-debug",

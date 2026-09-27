@@ -46,22 +46,38 @@ object MediaListCodec {
         )
     }
 
+    /**
+     * Delete payload (`0x00/0x28`), reverse-engineered from a Mimo<->Nano
+     * pcap (osmosis `CameraSession.deletePayload`):
+     * ```text
+     * [count:u8] [handle:u32 LE]... [counter:u32 LE] 00 [count:u32 LE] 01 01 00 00
+     * ```
+     * The camera answers with a status word (`u16-LE` at the reply payload
+     * start, `0x0000` = OK).
+     */
     fun buildDeletePayload(handles: List<Long>, counter: Int): ByteArray {
         require(handles.isNotEmpty()) { "Delete needs at least one media handle." }
-        val out = mutableListOf<Byte>()
-        handles.forEach { handle ->
-            out.add(0x0a.toByte())
-            out.add(0x04.toByte())
+        val out = java.io.ByteArrayOutputStream()
+        out.write(handles.size and 0xFF)
+        for (handle in handles) {
             val value = (handle and 0xFFFF_FFFF).toInt()
-            out.add((value and 0xFF).toByte())
-            out.add(((value ushr 8) and 0xFF).toByte())
-            out.add(((value ushr 16) and 0xFF).toByte())
-            out.add(((value ushr 24) and 0xFF).toByte())
+            out.write(value and 0xFF)
+            out.write((value ushr 8) and 0xFF)
+            out.write((value ushr 16) and 0xFF)
+            out.write((value ushr 24) and 0xFF)
         }
-        out.add(0x0c.toByte())
-        out.add(0x01.toByte())
-        out.add((counter and 0xFF).toByte())
+        writeU32Le(out, counter)
+        out.write(0x00)
+        writeU32Le(out, handles.size)
+        out.write(byteArrayOf(0x01, 0x01, 0x00, 0x00))
         return out.toByteArray()
+    }
+
+    private fun writeU32Le(out: java.io.ByteArrayOutputStream, value: Int) {
+        out.write(value and 0xFF)
+        out.write((value ushr 8) and 0xFF)
+        out.write((value ushr 16) and 0xFF)
+        out.write((value ushr 24) and 0xFF)
     }
 
     fun buildDeleteFrame(handles: List<Long>, counter: Int, messageId: Int): DumlFrame {
@@ -140,6 +156,18 @@ object MediaListCodec {
         fun reset() {
             buffer.clear()
             activeCounter = null
+        }
+
+        /**
+         * Takes whatever manifest bytes have been buffered so far (or null
+         * when nothing was). Lets the caller close a page on a quiet
+         * period when the camera never sends the `4A 03` end frame.
+         */
+        fun takePending(): ByteArray? {
+            if (buffer.isEmpty()) return null
+            val manifest = buffer.toByteArray()
+            reset()
+            return manifest
         }
     }
 
