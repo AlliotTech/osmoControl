@@ -576,6 +576,7 @@ class AndroidBleClient(
         private val REMOTE_NOTIFY_UUID: UUID = uuid16(0xFFF4)
         private val REMOTE_WRITE_UUID: UUID = uuid16(0xFFF5)
         private val CLIENT_CHARACTERISTIC_CONFIG_UUID: UUID = uuid16(0x2902)
+        private const val BRING_UP_SETTLE_MS = 200L
         private const val WAKE_MANUFACTURER_ID = 0x4B57
 
         private fun uuid16(shortUuid: Int): UUID =
