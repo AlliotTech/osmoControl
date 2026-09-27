@@ -20,6 +20,13 @@ interface HistoryStore {
     fun wasDeletedFromCamera(cameraId: String, path: String): Boolean
 
     /**
+     * True when a hash-verified download record exists for this exact
+     * path+size, regardless of whether it was later deleted from the
+     * camera. Backs the "已下载" badge in the media UI.
+     */
+    fun isFullyDownloaded(cameraId: String, path: String, sizeBytes: Long): Boolean
+
+    /**
      * Safe to delete from the camera: downloaded, SHA-256-verified, and
      * not already deleted. The caller additionally requires a
      * known-good, unshared delete handle on the [MediaItem][com.alliot.osmo.demo.media.model.MediaItem].
@@ -80,6 +87,12 @@ class FileHistoryStore(dir: File) : HistoryStore {
         synchronized(lock) {
             val rec = read(key(cameraId, path)) ?: return false
             return rec.sizeBytes == sizeBytes && rec.sha256Hex.isNotEmpty() && !rec.deleted
+        }
+
+    override fun isFullyDownloaded(cameraId: String, path: String, sizeBytes: Long): Boolean =
+        synchronized(lock) {
+            val rec = read(key(cameraId, path)) ?: return false
+            return rec.sizeBytes == sizeBytes && rec.sha256Hex.isNotEmpty()
         }
 
     private data class Record(val sizeBytes: Long, val sha256Hex: String, val deleted: Boolean)

@@ -42,6 +42,7 @@ dependencies {
     implementation(project(":core-session"))
     implementation(project(":core-ble"))
     implementation(project(":core-protocol"))
+    implementation(project(":core-media"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)

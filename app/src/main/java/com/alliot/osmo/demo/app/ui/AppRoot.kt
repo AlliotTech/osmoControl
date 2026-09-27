@@ -30,6 +30,8 @@ import com.alliot.osmo.demo.app.ui.home.DebugHomeAction
 import com.alliot.osmo.demo.app.ui.home.RealModePrerequisites
 import com.alliot.osmo.demo.app.ui.home.DebugHomeViewModel
 import com.alliot.osmo.demo.app.ui.home.DebugHomeViewModelFactory
+import com.alliot.osmo.demo.app.ui.media.MediaViewModel
+import com.alliot.osmo.demo.app.ui.media.MediaViewModelFactory
 import com.alliot.osmo.demo.app.ui.theme.OsmoDemoTheme
 import kotlinx.coroutines.flow.collect
 
@@ -42,6 +44,8 @@ fun AppRoot(container: AppContainer) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val factory = remember(container) { DebugHomeViewModelFactory(container) }
     val viewModel: DebugHomeViewModel = viewModel(factory = factory)
+    val mediaFactory = remember(container) { MediaViewModelFactory(container) }
+    val mediaViewModel: MediaViewModel = viewModel(factory = mediaFactory)
     val permissions = remember(context) { requiredPermissions() }
     val prefs = remember(context) { context.getSharedPreferences(PERMISSION_PREFS, Context.MODE_PRIVATE) }
     val appPreferences = remember(context) { AppPreferences(context) }
@@ -60,6 +64,7 @@ fun AppRoot(container: AppContainer) {
     OsmoDemoTheme(darkTheme = darkThemeEnabled) {
         DebugHomeScreen(
             viewModel = viewModel,
+            mediaViewModel = mediaViewModel,
             darkThemeEnabled = darkThemeEnabled,
             onToggleDarkTheme = { enabled ->
                 darkThemeEnabled = enabled
