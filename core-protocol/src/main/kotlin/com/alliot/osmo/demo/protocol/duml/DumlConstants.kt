@@ -17,15 +17,28 @@ object DumlFlags {
 object DumlCmdSet {
     const val GENERAL: Int = 0x00
     const val CAMERA: Int = 0x01
+    const val FILE_SYSTEM: Int = 0x02
     const val GIMBAL: Int = 0x04
     const val BATTERY: Int = 0x06
     const val WIFI: Int = 0x07
     const val STREAMING: Int = 0x08
+    const val STORAGE: Int = 0x0d
     const val WAKE: Int = 0x53
 }
 
 object DumlGeneralCmd {
+    const val MEDIA_LIST_QUERY: Int = 0x26
+    const val MEDIA_LIST_RESPONSE: Int = 0x27
+    const val MEDIA_DELETE: Int = 0x28
     const val SESSION_WAKE_KEEPALIVE: Int = 0x2b
+}
+
+object DumlFileSystemCmd {
+    const val FAVORITE: Int = 0xBF
+}
+
+object DumlStorageCmd {
+    const val GET_STATUS: Int = 0x02
 }
 
 object DumlWakeCmd {
@@ -33,6 +46,8 @@ object DumlWakeCmd {
 }
 
 object DumlWifiCmd {
+    const val GET_SSID: Int = 0x07
+    const val GET_PASSWORD: Int = 0x0e
     const val SET_PAIRING_PIN: Int = 0x45
     const val PAIRING_APPROVED: Int = 0x46
     const val WIFI_CONNECT: Int = 0x47

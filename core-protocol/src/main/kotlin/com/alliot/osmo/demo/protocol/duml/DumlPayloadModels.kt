@@ -35,6 +35,25 @@ data class GimbalTelemetryPayload(
     val tail: ByteArray = ByteArray(0),
 ) : DumlPayload
 
+data class WifiCredentialPayload(
+    val status: Int,
+    val value: String,
+) : DumlPayload
+
+data class WifiConnectPayload(
+    val ssid: String,
+    val password: String,
+) : DumlPayload
+
+data class StorageStatusPayload(
+    val storageIndex: Int,
+    val storageType: Int,
+    val storageName: String,
+    val totalSizeBytes: Long,
+    val usedSizeBytes: Long,
+    val isInserted: Boolean,
+) : DumlPayload
+
 data class RawDumlPayload(
     val bytes: ByteArray,
 ) : DumlPayload
