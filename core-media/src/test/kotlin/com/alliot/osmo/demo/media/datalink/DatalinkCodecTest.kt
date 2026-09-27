@@ -56,8 +56,8 @@ class DatalinkCodecTest {
     fun handshake_body_stamps_base_seq_le() {
         val body = DatalinkCodec.handshakeBody(0xB887)
         assertEquals(40, body.size)
-        assertEquals(0xB8, body[0].toInt() and 0xFF)
-        assertEquals(0x87, body[1].toInt() and 0xFF)
+        assertEquals(0x87, body[0].toInt() and 0xFF)
+        assertEquals(0xB8, body[1].toInt() and 0xFF)
         val other = DatalinkCodec.handshakeBody(0x1000)
         // Only the first two bytes differ.
         assertArrayEquals(body.copyOfRange(2, 40), other.copyOfRange(2, 40))
