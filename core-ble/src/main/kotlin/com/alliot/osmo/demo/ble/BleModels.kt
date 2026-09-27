@@ -23,6 +23,7 @@ sealed interface BleEvent {
     data class Notification(val bytes: ByteArray) : BleEvent
     data class Write(val bytes: ByteArray) : BleEvent
     data class Error(val message: String) : BleEvent
+    data class BringUp(val stage: String) : BleEvent
 }
 
 object WakeAdvertisingPayload {

@@ -459,7 +459,9 @@ class AndroidBleClient(
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
             Log.d(TAG, "onMtuChanged status=$status mtu=$mtu device=${gatt.device?.address}")
-            if (status != BluetoothGatt.GATT_SUCCESS) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                _events.tryEmit(BleEvent.BringUp("MTU $mtu negotiated"))
+            } else {
                 Log.w(TAG, "MTU request failed with status $status, continuing with service discovery.")
             }
             gatt.discoverServices()
@@ -490,6 +492,7 @@ class AndroidBleClient(
             when (descriptor.characteristic?.uuid) {
                 REMOTE_NOTIFY_UUID -> {
                     // FFF4 CCCD done -> subscribe FFF5 CCCD next.
+                    _events.tryEmit(BleEvent.BringUp("FFF4 CCCD subscribed"))
                     val writeChar = writeCharacteristic
                     val writeCccd = writeChar?.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG_UUID)
                     if (writeChar == null || writeCccd == null) {
@@ -503,12 +506,13 @@ class AndroidBleClient(
                 }
                 REMOTE_WRITE_UUID -> {
                     // FFF5 CCCD done -> arm FFF4 by writing 01 00 to its value (with response).
+                    _events.tryEmit(BleEvent.BringUp("FFF5 CCCD subscribed"))
                     val notifyChar = notifyCharacteristic
                     if (notifyChar == null) {
                         failConnect("FFF4 characteristic lost during bring-up.")
                         return
                     }
-                    Log.d(TAG, "Bring-up: writing 01 00 to FFF4 value")
+                    _events.tryEmit(BleEvent.BringUp("FFF4 arm 01 00 write issued"))
                     if (!writeCharacteristic(gatt, notifyChar, byteArrayOf(0x01, 0x00))) {
                         failConnect("Failed to arm FFF4.")
                     }
@@ -520,7 +524,7 @@ class AndroidBleClient(
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             if (characteristic.uuid == REMOTE_NOTIFY_UUID) {
                 // FFF4 arm (01 00) confirmed -> settle, then the link is ready.
-                Log.d(TAG, "onCharacteristicWrite status=$status FFF4 arm confirmed")
+                _events.tryEmit(BleEvent.BringUp("FFF4 arm confirmed; settling 200ms"))
                 if (status != BluetoothGatt.GATT_SUCCESS) {
                     failConnect("FFF4 arm failed with status $status.")
                     return
@@ -530,6 +534,7 @@ class AndroidBleClient(
                         Log.d(TAG, "Bring-up settled but connect no longer pending; skipping resolve")
                         return@postDelayed
                     }
+                    _events.tryEmit(BleEvent.BringUp("bring-up complete"))
                     Log.d(TAG, "Bring-up complete; resolving connect")
                     resolveConnect(gatt.device?.address ?: "unknown")
                 }, BRING_UP_SETTLE_MS)

@@ -538,10 +538,28 @@ class BleSessionController(
             // Mimo order (HCI snoop): session open first, pairing a beat later.
             writeDuml(GattWakeSequence.buildSessionOpenFrame(nextDumlMessageId()))
             delay(wakeWriteSpacingMs)
-            writeDuml(GattWakeSequence.buildSetPairingPinFrame(nextDumlMessageId(), pairingIdentifierProvider()))
+            val pairingIdentifier = pairingIdentifierProvider()
+            suspend fun sendPairingPin() {
+                writeDuml(GattWakeSequence.buildSetPairingPinFrame(nextDumlMessageId(), pairingIdentifier))
+            }
+            sendPairingPin()
             appendLog(LogCategory.BLE, "GATT wake attempt $attempt: pairing sent; waiting for camera.")
-            val pairStatus = withTimeoutOrNull(pairingTimeoutMs) {
-                pairingWaiter.await()
+            // osmosis resends SetPairingPIN at +2.5s/+5s when the sleeping camera
+            // hasn't answered yet; a single shot is often missed while it wakes.
+            val pairingRetryJob = scope.launch {
+                repeat(2) { index ->
+                    delay(2_500L)
+                    if (pairingWaiter.isCompleted) return@launch
+                    appendLog(LogCategory.BLE, "GATT wake attempt $attempt: no pairing reply; resending SetPairingPIN (${index + 1}/2).")
+                    runCatching { sendPairingPin() }
+                }
+            }
+            val pairStatus = try {
+                withTimeoutOrNull(pairingTimeoutMs) {
+                    pairingWaiter.await()
+                }
+            } finally {
+                pairingRetryJob.cancel()
             }
             if (pairStatus == null) {
                 appendLog(LogCategory.ERROR, "GATT wake attempt $attempt: pairing timed out (no 0x07/0x45 reply).")
@@ -871,6 +889,7 @@ class BleSessionController(
             is BleEvent.ScanStarted -> appendLog(LogCategory.BLE, "Scan started")
             is BleEvent.ScanStopped -> appendLog(LogCategory.BLE, "Scan stopped")
             is BleEvent.Write -> appendLog(LogCategory.TX, "Transport write.", event.bytes.joinToString(" ") { "%02X".format(it) })
+            is BleEvent.BringUp -> appendLog(LogCategory.BLE, "Bring-up: ${event.stage}")
         }
     }
 
