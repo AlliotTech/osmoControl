@@ -157,4 +157,21 @@ class DownloadManagerTest {
         assertTrue(reloaded.wasDeletedFromCamera("cam1", item().path))
         assertFalse(reloaded.canDeleteFromCamera("cam1", item().path, content.size.toLong()))
     }
+
+    @Test
+    fun isFullyDownloaded_ignores_deleted_flag_but_requires_size_match() {
+        val dir = tmp.newFolder("hist2")
+        val history = FileHistoryStore(dir)
+        val hash = sha256Hex(content)
+        val size = content.size.toLong()
+
+        assertFalse(history.isFullyDownloaded("cam1", item().path, size))
+        history.recordDownload("cam1", item().path, size, hash)
+        assertTrue(history.isFullyDownloaded("cam1", item().path, size))
+        assertFalse(history.isFullyDownloaded("cam1", item().path, size + 1))
+
+        // Still "fully downloaded" after the camera copy was deleted.
+        history.markDeletedFromCamera("cam1", item().path)
+        assertTrue(history.isFullyDownloaded("cam1", item().path, size))
+    }
 }

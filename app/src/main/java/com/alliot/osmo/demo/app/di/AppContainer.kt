@@ -14,10 +14,14 @@ import com.alliot.osmo.demo.session.real.BleSessionController
 class AppContainer(
     context: Context,
 ) {
+    val appContext: Context = context.applicationContext
     private val bleClient = AndroidBleClient(context)
     private val gpsPointProvider = AndroidGpsPointProvider(context)
     private val controllerIdentityStore = ControllerIdentityStore(context)
     private val pairedCameraStore = PairedCameraStore(context)
+
+    /** Persisted controller identity; also used as the media datalink pairing identifier. */
+    val controllerDeviceId: Long get() = controllerIdentityStore.controllerDeviceId()
 
     val fakeController: SessionController = FakeSessionController()
     val realController: SessionController = BleSessionController(

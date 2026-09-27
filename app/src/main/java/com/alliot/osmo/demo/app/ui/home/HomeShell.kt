@@ -76,10 +76,12 @@ fun HomeShell(
     onRetryConnectionScan: () -> Unit,
     onNavigateToDebugConsole: () -> Unit,
     workbenchContent: @Composable (LazyListState, Boolean) -> Unit,
+    mediaContent: @Composable (LazyListState, Boolean) -> Unit,
     debugConsoleContent: @Composable (LazyListState, Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val workbenchListState = rememberLazyListState()
+    val mediaListState = rememberLazyListState()
     val debugConsoleListState = rememberLazyListState()
     val versionLabel = remember(context) { appVersionLabel(context) }
     var showSettingsSheet by rememberSaveable { mutableStateOf(false) }
@@ -161,6 +163,7 @@ fun HomeShell(
                 ) {
                     when (state.destination) {
                         HomeDestination.WORKBENCH -> workbenchContent(workbenchListState, isLandscape)
+                        HomeDestination.MEDIA -> mediaContent(mediaListState, isLandscape)
                         HomeDestination.DEBUG_CONSOLE -> debugConsoleContent(debugConsoleListState, isLandscape)
                     }
                 }

@@ -2,10 +2,13 @@ package com.alliot.osmo.demo.app.ui.home
 
 import androidx.compose.runtime.Composable
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.alliot.osmo.demo.app.ui.media.MediaScreen
+import com.alliot.osmo.demo.app.ui.media.MediaViewModel
 
 @Composable
 fun DebugHomeScreen(
     viewModel: DebugHomeViewModel,
+    mediaViewModel: MediaViewModel,
     darkThemeEnabled: Boolean,
     onToggleDarkTheme: (Boolean) -> Unit,
 ) {
@@ -50,6 +53,12 @@ fun DebugHomeScreen(
                 onOpenDeviceActionsSheet = { viewModel.openSheet(HomeSheet.DEVICE_ACTIONS) },
                 onPermissionAction = viewModel::performPermissionAction,
                 onOpenRecentEvents = viewModel::openRecentEvents,
+            )
+        },
+        mediaContent = { listState, _ ->
+            MediaScreen(
+                viewModel = mediaViewModel,
+                listState = listState,
             )
         },
         debugConsoleContent = { listState, _ ->
