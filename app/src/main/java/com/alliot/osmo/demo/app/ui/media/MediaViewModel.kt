@@ -21,6 +21,7 @@ import com.alliot.osmo.demo.media.model.MediaItem
 import com.alliot.osmo.demo.media.exif.EmbeddedJpeg
 import com.alliot.osmo.demo.media.model.MediaStore
 import com.alliot.osmo.demo.media.repo.MediaRepository
+import com.alliot.osmo.demo.session.SessionController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
@@ -103,6 +104,8 @@ private data class LoadedPages(
 class MediaViewModel(
     appContext: Context,
     private val pairingIdentifier: String,
+    /** The live BLE session, used to read the camera's Wi-Fi credentials for auto-join. */
+    private val sessionController: SessionController? = null,
 ) : ViewModel() {
 
     private val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -240,19 +243,39 @@ class MediaViewModel(
     }
 
     /**
-     * If a camera AP SSID is set, join it (Android 10+, [CameraApJoiner]) and bind the
-     * process to that network before any socket opens; a blank SSID means the phone is
-     * already on the AP. Throws with a user-facing message on failure so the caller's
-     * existing failure path surfaces it.
+     * Bring the phone onto the camera AP before any socket opens. Credentials come, in
+     * order of preference, from (1) a manually entered SSID/password, else (2) the
+     * connected camera itself over BLE ([SessionController.fetchWifiCredentials] —
+     * 0x07/0x07 SSID, 0x07/0x0e password, so no manual entry is normally needed), else
+     * (3) nothing, meaning the phone is assumed already on the AP. Throws with a
+     * user-facing message on join failure so the caller's failure path surfaces it.
      */
     private suspend fun joinWifiIfNeeded() {
-        val ssid = _state.value.wifiSsid.trim()
-        if (ssid.isEmpty()) return
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            throw IllegalStateException("自动入网需要 Android 10 及以上；请手动连上相机 Wi-Fi 后清空 SSID 重试。")
+        var ssid = _state.value.wifiSsid.trim()
+        var password = _state.value.wifiPassword
+        var wpa3 = _state.value.wifiWpa3
+
+        if (ssid.isEmpty()) {
+            val creds = runCatching { sessionController?.fetchWifiCredentials() }.getOrNull()
+            if (creds != null) {
+                ssid = creds.ssid
+                password = creds.password
+                wpa3 = creds.wpa3
+                _state.update {
+                    it.copy(
+                        wifiSsid = creds.ssid,
+                        wifiWpa3 = creds.wpa3,
+                        status = "已从相机读取 Wi-Fi 凭据，正在入网「${creds.ssid}」…",
+                    )
+                }
+            }
         }
-        val password = _state.value.wifiPassword
-        val wpa3 = _state.value.wifiWpa3
+
+        if (ssid.isEmpty()) return
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            throw IllegalStateException("自动入网需要 Android 10 及以上；请手动连上相机 Wi-Fi 后重试。")
+        }
         apJoiner?.release()
         val joined = CompletableDeferred<Result<Unit>>()
         val joiner = CameraApJoiner(
@@ -274,7 +297,7 @@ class MediaViewModel(
         if (result == null) {
             joiner.release()
             apJoiner = null
-            throw IllegalStateException("加入 Wi-Fi「$ssid」超时；请检查 SSID/密码或相机热点是否开启。")
+            throw IllegalStateException("加入 Wi-Fi「$ssid」超时；请检查密码或相机热点是否开启。")
         }
         result.getOrElse {
             joiner.release()
@@ -645,6 +668,7 @@ class MediaViewModelFactory(
         return MediaViewModel(
             appContext = container.appContext,
             pairingIdentifier = container.controllerDeviceId.toString(),
+            sessionController = container.realController,
         ) as T
     }
 }

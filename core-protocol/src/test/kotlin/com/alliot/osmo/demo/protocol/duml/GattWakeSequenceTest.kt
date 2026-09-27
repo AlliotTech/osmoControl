@@ -3,6 +3,7 @@ package com.alliot.osmo.demo.protocol.duml
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -145,6 +146,48 @@ class GattWakeSequenceTest {
         assertEquals(62, info.size)
         assertArrayEquals(byteArrayOf(0x00, 0x41, 0x50, 0x50), info.copyOfRange(0, 4))
         assertArrayEquals(info, ack.payload)
+    }
+
+    @Test
+    fun wifi_credential_frames_target_wifi_subsystem() {
+        val ssidFrame = GattWakeSequence.buildGetWifiSsidFrame(messageId = 0x10)
+        assertEquals(DumlCmdSet.WIFI, ssidFrame.cmdSet)
+        assertEquals(DumlWifiCmd.GET_SSID, ssidFrame.cmdId)
+        assertEquals(DumlTargets.APP_TO_WIFI, ssidFrame.target)
+        val passFrame = GattWakeSequence.buildGetWifiPasswordFrame(messageId = 0x11)
+        assertEquals(DumlWifiCmd.GET_PASSWORD, passFrame.cmdId)
+    }
+
+    @Test
+    fun wifi_credential_reply_parses_status_prefixed_packstring() {
+        val ssid = "OsmoNano-C2D8"
+        val reply = DumlFrame(
+            target = DumlTargets.APP_TO_WIFI,
+            messageId = 0x10,
+            flags = DumlFlags.RESPONSE,
+            cmdSet = DumlCmdSet.WIFI,
+            cmdId = DumlWifiCmd.GET_SSID,
+            payload = byteArrayOf(0x00) + DumlStringCodec.pack(ssid),
+        )
+        val decoded = DumlFrameCodec.decode(DumlFrameCodec.encode(reply))
+        assertTrue(GattWakeSequence.isWifiSsidReply(decoded))
+        assertFalse(GattWakeSequence.isWifiPasswordReply(decoded))
+        assertEquals(ssid, GattWakeSequence.wifiCredentialValue(decoded))
+    }
+
+    @Test
+    fun wifi_credential_reply_is_null_when_status_only() {
+        val reply = DumlFrame(
+            target = DumlTargets.APP_TO_WIFI,
+            messageId = 0x11,
+            flags = DumlFlags.RESPONSE,
+            cmdSet = DumlCmdSet.WIFI,
+            cmdId = DumlWifiCmd.GET_PASSWORD,
+            payload = byteArrayOf(0x00),
+        )
+        val decoded = DumlFrameCodec.decode(DumlFrameCodec.encode(reply))
+        assertTrue(GattWakeSequence.isWifiPasswordReply(decoded))
+        assertNull(GattWakeSequence.wifiCredentialValue(decoded))
     }
 
     private fun hex(value: String): ByteArray {

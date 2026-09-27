@@ -38,6 +38,7 @@ import com.alliot.osmo.demo.session.model.LogCategory
 import com.alliot.osmo.demo.session.model.SessionGpsPoint
 import com.alliot.osmo.demo.session.model.SessionDevice
 import com.alliot.osmo.demo.session.model.SessionStatus
+import com.alliot.osmo.demo.session.model.WifiCredentials
 import com.alliot.osmo.demo.session.model.SessionTransportMode
 import com.alliot.osmo.demo.session.model.inferSessionDevice
 import com.alliot.osmo.demo.session.model.resolveConnectedProfile
@@ -110,6 +111,8 @@ class BleSessionController(
     private var dumlMessageId = 0
     private var wakeReplyDeferred: CompletableDeferred<Unit>? = null
     private var pairingResultDeferred: CompletableDeferred<Int>? = null
+    private var wifiSsidDeferred: CompletableDeferred<String?>? = null
+    private var wifiPasswordDeferred: CompletableDeferred<String?>? = null
     private var localControllerMac = DEFAULT_CONTROLLER_MAC
     private val rejectedDevicesInCurrentScan = mutableSetOf<String>()
     private var preserveRejectedStateOnDisconnect = false
@@ -612,6 +615,44 @@ class BleSessionController(
         return dumlMessageId
     }
 
+    override suspend fun fetchWifiCredentials(): WifiCredentials? {
+        if (!_status.value.protocolReady || _status.value.sleeping) {
+            appendLog(LogCategory.BLE, "Wi-Fi creds: camera not connected/awake.")
+            return null
+        }
+        val ssidWaiter = CompletableDeferred<String?>()
+        val passWaiter = CompletableDeferred<String?>()
+        wifiSsidDeferred = ssidWaiter
+        wifiPasswordDeferred = passWaiter
+        return try {
+            writeDuml(GattWakeSequence.buildGetWifiSsidFrame(nextDumlMessageId()))
+            delay(wakeWriteSpacingMs)
+            writeDuml(GattWakeSequence.buildGetWifiPasswordFrame(nextDumlMessageId()))
+            val deviceName = _status.value.connectedDevice?.name
+            val ssid = withTimeoutOrNull(WIFI_CREDENTIALS_TIMEOUT_MS) { ssidWaiter.await() }
+                ?.takeIf { it.isNotBlank() }
+                ?: deviceName
+            val password = withTimeoutOrNull(WIFI_CREDENTIALS_TIMEOUT_MS) { passWaiter.await() }
+            if (ssid.isNullOrBlank() || password.isNullOrBlank()) {
+                appendLog(
+                    LogCategory.BLE,
+                    "Wi-Fi creds incomplete (ssid=${ssid ?: "?"}, password=${if (password != null) "ok" else "?"}).",
+                )
+                return null
+            }
+            val wpa3 = ssid.contains("360", ignoreCase = true) ||
+                (deviceName?.contains("360", ignoreCase = true) == true)
+            appendLog(LogCategory.BLE, "Wi-Fi creds retrieved over BLE for \"$ssid\" (wpa3=$wpa3).")
+            WifiCredentials(ssid = ssid, password = password, wpa3 = wpa3)
+        } catch (e: Exception) {
+            appendLog(LogCategory.ERROR, "Wi-Fi creds fetch failed: ${e.message}")
+            null
+        } finally {
+            if (wifiSsidDeferred === ssidWaiter) wifiSsidDeferred = null
+            if (wifiPasswordDeferred === passWaiter) wifiPasswordDeferred = null
+        }
+    }
+
     override suspend fun wakeAndSnapshot() {
         if (_status.value.protocolReady && !_status.value.sleeping) {
             reportRecordKeyClick()
@@ -962,6 +1003,19 @@ class BleSessionController(
             if (GattWakeSequence.isPairingApprovalFrame(frame)) {
                 appendLog(LogCategory.BLE, "Pairing approved by camera.")
                 pairingResultDeferred?.complete(GattWakeSequence.PAIR_STATUS_ALREADY_PAIRED)
+            }
+            if (GattWakeSequence.isWifiSsidReply(frame)) {
+                val ssid = GattWakeSequence.wifiCredentialValue(frame)
+                appendLog(LogCategory.BLE, "Wi-Fi SSID reply: ${ssid ?: "<none>"}.")
+                wifiSsidDeferred?.complete(ssid)
+            }
+            if (GattWakeSequence.isWifiPasswordReply(frame)) {
+                val password = GattWakeSequence.wifiCredentialValue(frame)
+                appendLog(
+                    LogCategory.BLE,
+                    "Wi-Fi password reply: ${if (password != null) "${password.length} chars" else "<none>"}.",
+                )
+                wifiPasswordDeferred?.complete(password)
             }
             if (frame.flags == DumlFlags.REQUEST) {
                 // The camera drops the link (~6s) when its requests go unanswered.
@@ -1735,6 +1789,7 @@ class BleSessionController(
         private const val RECONNECT_DELAY_MS = 1_000L
         private const val MAX_RECONNECT_ATTEMPTS = 3
         private const val COMMAND_TIMEOUT_MS = 3_000L
+        private const val WIFI_CREDENTIALS_TIMEOUT_MS = 3_000L
     }
 
     private data class CommandKey(val cmdSet: Int, val cmdId: Int)

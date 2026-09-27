@@ -74,6 +74,44 @@ object GattWakeSequence {
         payload = wakeCameraPayload(),
     )
 
+    fun buildGetWifiSsidFrame(messageId: Int): DumlFrame = DumlFrame.request(
+        target = DumlTargets.APP_TO_WIFI,
+        messageId = messageId,
+        cmdSet = DumlCmdSet.WIFI,
+        cmdId = DumlWifiCmd.GET_SSID,
+    )
+
+    fun buildGetWifiPasswordFrame(messageId: Int): DumlFrame = DumlFrame.request(
+        target = DumlTargets.APP_TO_WIFI,
+        messageId = messageId,
+        cmdSet = DumlCmdSet.WIFI,
+        cmdId = DumlWifiCmd.GET_PASSWORD,
+    )
+
+    /** 0x07/0x07 GetWifiSsid reply from the camera (not our own REQUEST). */
+    fun isWifiSsidReply(frame: DumlDecodedFrame): Boolean =
+        frame.cmdSet == DumlCmdSet.WIFI &&
+            frame.cmdId == DumlWifiCmd.GET_SSID &&
+            frame.flags != DumlFlags.REQUEST
+
+    /** 0x07/0x0e GetWifiPassword reply from the camera. */
+    fun isWifiPasswordReply(frame: DumlDecodedFrame): Boolean =
+        frame.cmdSet == DumlCmdSet.WIFI &&
+            frame.cmdId == DumlWifiCmd.GET_PASSWORD &&
+            frame.flags != DumlFlags.REQUEST
+
+    /**
+     * The string in a Wi-Fi credential reply, whose body is `[status:1][PackString]`
+     * (osmosis' GetWifiSsid / GetWifiPassword). Null when empty or malformed.
+     */
+    fun wifiCredentialValue(frame: DumlDecodedFrame): String? {
+        val payload = frame.payload
+        if (payload.size < 2) return null
+        return runCatching { DumlStringCodec.unpack(payload, 1).value }
+            .getOrNull()
+            ?.takeIf { it.isNotEmpty() }
+    }
+
     fun isWakeReply(frame: DumlDecodedFrame): Boolean =
         frame.cmdSet == DumlCmdSet.WAKE &&
             frame.cmdId == DumlWakeCmd.WAKE_CAMERA &&

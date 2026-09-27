@@ -582,6 +582,15 @@ class DebugHomeViewModelTest {
             recordedCalls += "disconnect"
         }
 
+        override suspend fun fetchWifiCredentials(): com.alliot.osmo.demo.session.model.WifiCredentials? {
+            recordedCalls += "fetchWifiCredentials"
+            return null
+        }
+
+        override suspend fun wakeViaGatt() {
+            recordedCalls += "wakeViaGatt"
+        }
+
         override suspend fun requestVersion() {
             recordedCalls += "requestVersion"
         }

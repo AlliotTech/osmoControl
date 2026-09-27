@@ -3,6 +3,7 @@ package com.alliot.osmo.demo.session
 import com.alliot.osmo.demo.session.log.SessionLogEntry
 import com.alliot.osmo.demo.session.model.CameraStatusSnapshot
 import com.alliot.osmo.demo.session.model.SessionDevice
+import com.alliot.osmo.demo.session.model.WifiCredentials
 import com.alliot.osmo.demo.session.model.SessionStatus
 import kotlinx.coroutines.flow.StateFlow
 
@@ -33,5 +34,11 @@ interface SessionController {
     suspend fun reportQsKeyClick()
     suspend fun reportSnapshotKeyClick()
     suspend fun sendManualCommand(hex: String)
+    /**
+     * Reads the connected camera's own AP SSID + passphrase over the open BLE link
+     * (0x07/0x07, 0x07/0x0e), so the media flow can auto-join without manual entry.
+     * Null when not connected/awake or the camera withholds them.
+     */
+    suspend fun fetchWifiCredentials(): WifiCredentials?
     suspend fun setHandshakeVerifyMode(mode: Int)
 }

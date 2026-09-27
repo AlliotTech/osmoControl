@@ -64,8 +64,8 @@ fun MediaScreen(
         item {
             HomeSectionCard(title = "相机连接") {
                 Text(
-                    text = "填写相机热点 SSID 与密码可在 Android 10+ 自动入网并绑定到相机网络；" +
-                        "留空 SSID 则需自行先连上相机 Wi-Fi。相机 IP：Action 5 Pro 默认 192.168.2.1。",
+                    text = "已在工作台通过蓝牙连上相机时，点“连接并加载”会自动读取相机 Wi-Fi 并入网（Android 10+），" +
+                        "无需手动填写。下面的 SSID/密码仅在自动获取失败时作为备用。相机 IP：Action 5 Pro 默认 192.168.2.1。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

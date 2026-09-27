@@ -79,6 +79,14 @@ data class SessionDevice(
     val workbenchSupported: Boolean = true,
 )
 
+/** The camera's own AP credentials, read over BLE (0x07/0x07 SSID, 0x07/0x0e password). */
+data class WifiCredentials(
+    val ssid: String,
+    val password: String,
+    /** The Osmo 360 AP is WPA3-SAE; every other body is WPA2-PSK. */
+    val wpa3: Boolean = false,
+)
+
 data class CameraStatusSnapshot(
     val mode: Int = 0x01,
     val state: Int = 0x01,
