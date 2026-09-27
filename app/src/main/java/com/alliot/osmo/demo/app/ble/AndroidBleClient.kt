@@ -552,9 +552,9 @@ class AndroidBleClient(
         @Deprecated("BluetoothGattCallback compatibility overload")
         @Suppress("DEPRECATION")
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            if (characteristic.uuid != REMOTE_NOTIFY_UUID) return
+            if (characteristic.uuid != REMOTE_NOTIFY_UUID && characteristic.uuid != REMOTE_WRITE_UUID) return
             val value = readCharacteristicValue(characteristic)
-            Log.d(TAG, "FFF4 notify(legacy): ${value.toHex()}")
+            Log.d(TAG, "notify(legacy) ${characteristic.uuid}: ${value.toHex()}")
             _events.tryEmit(BleEvent.Notification(value))
         }
 
@@ -564,8 +564,8 @@ class AndroidBleClient(
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray,
         ) {
-            if (characteristic.uuid != REMOTE_NOTIFY_UUID) return
-            Log.d(TAG, "FFF4 notify: ${value.toHex()}")
+            if (characteristic.uuid != REMOTE_NOTIFY_UUID && characteristic.uuid != REMOTE_WRITE_UUID) return
+            Log.d(TAG, "notify ${characteristic.uuid}: ${value.toHex()}")
             _events.tryEmit(BleEvent.Notification(value))
         }
     }
@@ -576,7 +576,7 @@ class AndroidBleClient(
 
     private companion object {
         private const val TAG = "OsmoBle"
-        private const val REQUEST_MTU = 500 // osmosis: at 517 the camera stops answering every request
+        private const val REQUEST_MTU = 517 // match osmosis GattClient.kt (working code)
         private val REMOTE_SERVICE_UUID: UUID = uuid16(0xFFF0)
         private val REMOTE_NOTIFY_UUID: UUID = uuid16(0xFFF4)
         private val REMOTE_WRITE_UUID: UUID = uuid16(0xFFF5)
