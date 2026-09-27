@@ -1,10 +1,14 @@
 package com.alliot.osmo.demo.app.ui.media
 
 import android.content.Context
+import android.net.LinkProperties
+import android.net.Network
+import android.os.Build
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.alliot.osmo.demo.app.di.AppContainer
+import com.alliot.osmo.demo.app.net.CameraApJoiner
 import com.alliot.osmo.demo.media.datalink.DatalinkTransport
 import com.alliot.osmo.demo.media.download.DownloadManager
 import com.alliot.osmo.demo.media.download.FileHistoryStore
@@ -14,6 +18,7 @@ import com.alliot.osmo.demo.media.model.MediaItem
 import com.alliot.osmo.demo.media.model.MediaStore
 import com.alliot.osmo.demo.media.repo.MediaRepository
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -22,6 +27,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
 enum class MediaConnectionState {
@@ -50,6 +56,12 @@ data class MediaUiState(
     /** path -> 0..1 while a download is running. */
     val downloadProgress: Map<String, Float> = emptyMap(),
     val status: String? = null,
+    /** Camera AP SSID; blank means "phone is already on the AP, skip auto-join". */
+    val wifiSsid: String = "",
+    /** Camera AP passphrase. Held in memory only, never persisted. */
+    val wifiPassword: String = "",
+    /** The Osmo 360 AP is WPA3-SAE; every other body is WPA2-PSK. */
+    val wifiWpa3: Boolean = false,
     val deleteCandidate: MediaRow? = null,
 )
 
@@ -62,8 +74,10 @@ private data class LoadedPages(
 /**
  * Media browsing / download / delete over the camera's Wi-Fi datalink.
  *
- * Bring-up: the phone must already be on the camera's Wi-Fi AP; then
- * [connectAndLoad] opens the UDP datalink ([DatalinkTransport]), lists
+ * Bring-up: either supply the camera AP SSID/passphrase so [connectAndLoad]
+ * auto-joins it (Android 10+, via [CameraApJoiner]) and binds the process to
+ * that network, or leave the SSID blank and put the phone on the AP yourself.
+ * Then [connectAndLoad] opens the UDP datalink ([DatalinkTransport]), lists
  * both stores ([MediaRepository]) and downloads go over HTTP
  * ([DownloadManager]). All blocking calls run on Dispatchers.IO.
  */
@@ -77,20 +91,38 @@ class MediaViewModel(
     private val history: HistoryStore =
         FileHistoryStore(File(filesDir, HISTORY_DIR).apply { mkdirs() })
     private val workDir: File = File(filesDir, WORK_DIR).apply { mkdirs() }
+    private val app = appContext.applicationContext
 
     private val stackMutex = Mutex()
     private var transport: DatalinkTransport? = null
     private var repository: MediaRepository? = null
     private var downloader: DownloadManager? = null
+    private var apJoiner: CameraApJoiner? = null
 
     private val _state = MutableStateFlow(
-        MediaUiState(cameraIp = prefs.getString(KEY_CAMERA_IP, DEFAULT_CAMERA_IP) ?: DEFAULT_CAMERA_IP),
+        MediaUiState(
+            cameraIp = prefs.getString(KEY_CAMERA_IP, DEFAULT_CAMERA_IP) ?: DEFAULT_CAMERA_IP,
+            wifiSsid = prefs.getString(KEY_WIFI_SSID, "") ?: "",
+        ),
     )
     val state: StateFlow<MediaUiState> = _state.asStateFlow()
 
     fun updateCameraIp(ip: String) {
         _state.update { it.copy(cameraIp = ip, status = null) }
         prefs.edit().putString(KEY_CAMERA_IP, ip).apply()
+    }
+
+    fun updateWifiSsid(ssid: String) {
+        _state.update { it.copy(wifiSsid = ssid, status = null) }
+        prefs.edit().putString(KEY_WIFI_SSID, ssid).apply()
+    }
+
+    fun updateWifiPassword(password: String) {
+        _state.update { it.copy(wifiPassword = password, status = null) }
+    }
+
+    fun updateWifiWpa3(wpa3: Boolean) {
+        _state.update { it.copy(wifiWpa3 = wpa3, status = null) }
     }
 
     fun connectAndLoad() {
@@ -116,6 +148,7 @@ class MediaViewModel(
             val outcome: Result<LoadedPages> = withContext(Dispatchers.IO) {
                 try {
                     stackMutex.withLock {
+                        joinWifiIfNeeded()
                         transport?.close()
                         val t = DatalinkTransport()
                         check(t.open(ip, pairingIdentifier)) { "UDP datalink 握手失败" }
@@ -184,6 +217,71 @@ class MediaViewModel(
                     }
                 },
             )
+        }
+    }
+
+    /**
+     * If a camera AP SSID is set, join it (Android 10+, [CameraApJoiner]) and bind the
+     * process to that network before any socket opens; a blank SSID means the phone is
+     * already on the AP. Throws with a user-facing message on failure so the caller's
+     * existing failure path surfaces it.
+     */
+    private suspend fun joinWifiIfNeeded() {
+        val ssid = _state.value.wifiSsid.trim()
+        if (ssid.isEmpty()) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            throw IllegalStateException("自动入网需要 Android 10 及以上；请手动连上相机 Wi-Fi 后清空 SSID 重试。")
+        }
+        val password = _state.value.wifiPassword
+        val wpa3 = _state.value.wifiWpa3
+        apJoiner?.release()
+        val joined = CompletableDeferred<Result<Unit>>()
+        val joiner = CameraApJoiner(
+            app,
+            object : CameraApJoiner.Listener {
+                override fun onLog(s: String) {}
+                override fun onNetwork(network: Network, link: LinkProperties?) {
+                    joined.complete(Result.success(Unit))
+                }
+                override fun onFailed(reason: String) {
+                    joined.complete(Result.failure(IllegalStateException(reason)))
+                }
+                override fun onLost() = onWifiLost()
+            },
+        )
+        apJoiner = joiner
+        joiner.join(ssid, password, wpa3)
+        val result = withTimeoutOrNull(WIFI_JOIN_TIMEOUT_MS) { joined.await() }
+        if (result == null) {
+            joiner.release()
+            apJoiner = null
+            throw IllegalStateException("加入 Wi-Fi「$ssid」超时；请检查 SSID/密码或相机热点是否开启。")
+        }
+        result.getOrElse {
+            joiner.release()
+            apJoiner = null
+            throw IllegalStateException(it.message ?: "加入 Wi-Fi 失败")
+        }
+    }
+
+    /** The camera AP dropped mid-session: tear the datalink down so the UI reflects reality. */
+    private fun onWifiLost() {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                stackMutex.withLock {
+                    transport?.close()
+                    transport = null
+                    repository = null
+                    downloader = null
+                }
+            }
+            _state.update {
+                it.copy(
+                    connection = MediaConnectionState.DISCONNECTED,
+                    isLoading = false,
+                    status = "相机 Wi-Fi 已断开，请重新连接。",
+                )
+            }
         }
     }
 
@@ -304,6 +402,8 @@ class MediaViewModel(
                     transport = null
                     repository = null
                     downloader = null
+                    apJoiner?.release()
+                    apJoiner = null
                 }
             }
             _state.update {
@@ -325,6 +425,7 @@ class MediaViewModel(
 
     override fun onCleared() {
         transport?.close()
+        apJoiner?.release()
         super.onCleared()
     }
 
@@ -346,6 +447,8 @@ class MediaViewModel(
         private const val KEY_CAMERA_IP = "camera_ip"
         private const val HISTORY_DIR = "media-history"
         private const val WORK_DIR = "media"
+        private const val KEY_WIFI_SSID = "wifi_ssid"
+        private const val WIFI_JOIN_TIMEOUT_MS = 30_000L
     }
 }
 
