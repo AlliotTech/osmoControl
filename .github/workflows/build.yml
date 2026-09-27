@@ -6,6 +6,11 @@ on:
   pull_request:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to attach the APK to (e.g. v0.0.3)'
+        required: true
 
 permissions:
   contents: write
@@ -44,10 +49,11 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
 
       - name: Attach APK to release
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          APK="app/build/outputs/apk/debug/osmoControl-${{ github.event.release.tag_name }}.apk"
+          TAG="${{ github.event.release.tag_name || inputs.tag }}"
+          APK="app/build/outputs/apk/debug/osmoControl-${TAG}.apk"
           mv app/build/outputs/apk/debug/app-debug.apk "$APK"
-          gh release upload "${{ github.event.release.tag_name }}" "$APK" --clobber
+          gh release upload "$TAG" "$APK" --clobber
