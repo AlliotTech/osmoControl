@@ -847,8 +847,10 @@ class BleSessionController(
 
     private suspend fun handleNotification(bytes: ByteArray) {
         if (bytes.isEmpty()) return
-        if (bytes[0] == 0x55.toByte()) {
-            protocolRxBuffer = ByteArray(0)
+        if (bytes[0] == 0x55.toByte() || dumlRxBuffer.isNotEmpty()) {
+            // A pending DUML fragment means this chunk is a continuation
+            // even when it no longer starts with 0x55.
+            if (bytes[0] == 0x55.toByte()) protocolRxBuffer = ByteArray(0)
             handleDumlNotification(bytes)
             return
         }

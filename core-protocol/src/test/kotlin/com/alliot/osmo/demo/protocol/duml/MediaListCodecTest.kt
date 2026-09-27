@@ -176,27 +176,73 @@ class MediaListCodecTest {
     }
 
     @Test
-    fun storage_status_decode() {
-        val name = "SD".toByteArray(Charsets.UTF_8)
-        val payload = byteArrayOf(0x00, 0x01, name.size.toByte()) +
-            name +
-            u64Le(64L * 1024 * 1024 * 1024) +
-            u64Le(10L * 1024 * 1024 * 1024) +
-            byteArrayOf(0x01)
+    fun active_store_status_decode_0x02_0x80() {
+        // flags u32LE @0 (bit 30 = in playback), total MiB u32LE @5, free MiB @9.
+        val payload = u32Le(0x40000000L) + byteArrayOf(0x00) + u32Le(121785L) + u32Le(109748L)
         val decoded = DumlPayloadCodec.decode(
-            DumlCmdSet.STORAGE,
-            DumlStorageCmd.GET_STATUS,
-            DumlFlags.RESPONSE,
+            DumlCmdSet.FILE_SYSTEM,
+            DumlFileSystemCmd.ACTIVE_STORE_STATUS,
+            DumlFlags.NOTIFY,
             payload,
         )
-        assertTrue(decoded is StorageStatusPayload)
-        decoded as StorageStatusPayload
-        assertEquals(0, decoded.storageIndex)
-        assertEquals(1, decoded.storageType)
-        assertEquals("SD", decoded.storageName)
-        assertEquals(64L * 1024 * 1024 * 1024, decoded.totalSizeBytes)
-        assertEquals(10L * 1024 * 1024 * 1024, decoded.usedSizeBytes)
-        assertTrue(decoded.isInserted)
+        assertTrue(decoded is ActiveStoreStatusPayload)
+        decoded as ActiveStoreStatusPayload
+        assertEquals(0x40000000L, decoded.flags)
+        assertTrue(decoded.inPlayback)
+        assertEquals(121785L, decoded.totalMb)
+        assertEquals(109748L, decoded.freeMb)
+    }
+
+    @Test
+    fun stores_status_decode_0x02_0xdc() {
+        // 40-byte two-store body: store count @2, first block @6/@10, built-in @24/@28.
+        val payload = ByteArray(40)
+        payload[2] = 0x02
+        u32Le(121785L).copyInto(payload, 6)
+        u32Le(109748L).copyInto(payload, 10)
+        u32Le(48980L).copyInto(payload, 24)
+        u32Le(40000L).copyInto(payload, 28)
+        val decoded = DumlPayloadCodec.decode(
+            DumlCmdSet.FILE_SYSTEM,
+            DumlFileSystemCmd.STORES_STATUS,
+            DumlFlags.NOTIFY,
+            payload,
+        )
+        assertTrue(decoded is StoresStatusPayload)
+        decoded as StoresStatusPayload
+        assertEquals(2, decoded.storeCount)
+        assertEquals(121785L, decoded.sdTotalMb)
+        assertEquals(109748L, decoded.sdFreeMb)
+        assertEquals(48980L, decoded.internalTotalMb)
+        assertEquals(40000L, decoded.internalFreeMb)
+    }
+
+    @Test
+    fun stores_status_single_store_body_has_no_internal() {
+        val payload = ByteArray(22)
+        payload[2] = 0x01
+        u32Le(30500L).copyInto(payload, 6)
+        u32Le(29000L).copyInto(payload, 10)
+        val decoded = DumlPayloadCodec.decode(
+            DumlCmdSet.FILE_SYSTEM,
+            DumlFileSystemCmd.STORES_STATUS,
+            DumlFlags.NOTIFY,
+            payload,
+        ) as StoresStatusPayload
+        assertEquals(30500L, decoded.sdTotalMb)
+        assertEquals(null, decoded.internalTotalMb)
+    }
+
+    @Test
+    fun battery_push_0x0d_0x02_stays_raw() {
+        // 0x0d/0x02 is the battery/dock push (NOT storage) — never decode it.
+        val decoded = DumlPayloadCodec.decode(
+            DumlCmdSet.POWER,
+            DumlBatteryCmd.BATTERY_PUSH,
+            DumlFlags.NOTIFY,
+            byteArrayOf(0x01, 0x02, 0x03),
+        )
+        assertTrue(decoded is RawDumlPayload)
     }
 
     private fun responseFrame(subtype: Int, counter: Int, body: ByteArray): DumlDecodedFrame {
@@ -216,6 +262,10 @@ class MediaListCodecTest {
                 ),
             ),
         )
+    }
+
+    private fun u32Le(value: Long): ByteArray {
+        return ByteArray(4) { index -> ((value ushr (index * 8)) and 0xFF).toByte() }
     }
 
     private fun u64Le(value: Long): ByteArray {

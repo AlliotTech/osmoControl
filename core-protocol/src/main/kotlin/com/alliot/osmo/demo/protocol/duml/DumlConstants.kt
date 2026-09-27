@@ -22,7 +22,8 @@ object DumlCmdSet {
     const val BATTERY: Int = 0x06
     const val WIFI: Int = 0x07
     const val STREAMING: Int = 0x08
-    const val STORAGE: Int = 0x0d
+    /** Battery/dock push set (e.g. `0x0d/0x02` power frame). NOT storage. */
+    const val POWER: Int = 0x0d
     const val WAKE: Int = 0x53
 }
 
@@ -35,10 +36,15 @@ object DumlGeneralCmd {
 
 object DumlFileSystemCmd {
     const val FAVORITE: Int = 0xBF
+    /** Unprompted push: active-store status. flags u32LE @0 (bit 30 = in playback), total MiB u32LE @5, free MiB @9. */
+    const val ACTIVE_STORE_STATUS: Int = 0x80
+    /** Unprompted push: per-store [total][free] u32LE MiB blocks. Byte 2 = store count; block 1 @6/@10, internal @24/@28 (if body >= 32 B). */
+    const val STORES_STATUS: Int = 0xDC
 }
 
-object DumlStorageCmd {
-    const val GET_STATUS: Int = 0x02
+/** Unprompted battery/dock push. The byte layout was only ever mapped on the Nano — keep it raw. */
+object DumlBatteryCmd {
+    const val BATTERY_PUSH: Int = 0x02
 }
 
 object DumlWakeCmd {
