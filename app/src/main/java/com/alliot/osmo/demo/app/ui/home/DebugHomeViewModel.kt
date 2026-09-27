@@ -162,6 +162,8 @@ class DebugHomeViewModel internal constructor(
     }
     fun sleep() = launch("Sending sleep") { activeController.sleep() }
     fun wake() = launch("Sending wake") { activeController.wake() }
+
+    fun wakeViaGatt() = launch("Sending GATT wake") { activeController.wakeViaGatt() }
     fun wakeAndSnapshot() = launch("Wake and snapshot") { activeController.wakeAndSnapshot() }
     fun sendRecordKeyClick() = launch("Sending record key click") { activeController.reportRecordKeyClick() }
     fun sendQsKeyClick() = launch("Sending QS key click") { activeController.reportQsKeyClick() }

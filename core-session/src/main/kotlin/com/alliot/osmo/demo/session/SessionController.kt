@@ -27,6 +27,7 @@ interface SessionController {
     suspend fun setGpsLocationRequestFrequencyHz(hz: Int)
     suspend fun sleep()
     suspend fun wake()
+    suspend fun wakeViaGatt()
     suspend fun wakeAndSnapshot()
     suspend fun reportRecordKeyClick()
     suspend fun reportQsKeyClick()

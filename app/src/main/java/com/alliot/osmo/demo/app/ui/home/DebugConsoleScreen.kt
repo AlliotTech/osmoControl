@@ -55,6 +55,7 @@ fun DebugConsoleScreen(
     onSubscribe: () -> Unit,
     onSleep: () -> Unit,
     onWake: () -> Unit,
+    onWakeViaGatt: () -> Unit,
     onWakeAndSnapshot: () -> Unit,
     onRecordKeyClick: () -> Unit,
     onQsKeyClick: () -> Unit,
@@ -108,6 +109,7 @@ fun DebugConsoleScreen(
                 onSubscribe = onSubscribe,
                 onSleep = onSleep,
                 onWake = onWake,
+                onWakeViaGatt = onWakeViaGatt,
                 onWakeAndSnapshot = onWakeAndSnapshot,
                 onRecordKeyClick = onRecordKeyClick,
                 onQsKeyClick = onQsKeyClick,
@@ -351,6 +353,7 @@ private fun DebugCommandsSection(
     onSubscribe: () -> Unit,
     onSleep: () -> Unit,
     onWake: () -> Unit,
+    onWakeViaGatt: () -> Unit,
     onWakeAndSnapshot: () -> Unit,
     onRecordKeyClick: () -> Unit,
     onQsKeyClick: () -> Unit,
@@ -369,6 +372,7 @@ private fun DebugCommandsSection(
             onSubscribe = onSubscribe,
             onSleep = onSleep,
             onWake = onWake,
+            onWakeViaGatt = onWakeViaGatt,
             onWakeAndSnapshot = onWakeAndSnapshot,
             onRecordKeyClick = onRecordKeyClick,
             onQsKeyClick = onQsKeyClick,
@@ -638,6 +642,7 @@ private fun handleDebugAction(
     onSubscribe: () -> Unit,
     onSleep: () -> Unit,
     onWake: () -> Unit,
+    onWakeViaGatt: () -> Unit,
     onWakeAndSnapshot: () -> Unit,
     onRecordKeyClick: () -> Unit,
     onQsKeyClick: () -> Unit,
@@ -651,6 +656,7 @@ private fun handleDebugAction(
         DebugConsoleActionType.SUBSCRIBE_STATUS -> onSubscribe()
         DebugConsoleActionType.SLEEP -> onSleep()
         DebugConsoleActionType.WAKE -> onWake()
+        DebugConsoleActionType.GATT_WAKE -> onWakeViaGatt()
         DebugConsoleActionType.SWITCH_MODE -> onSwitchMode(action.mode ?: return)
         DebugConsoleActionType.WAKE_AND_SNAPSHOT -> onWakeAndSnapshot()
         DebugConsoleActionType.RECORD_KEY -> onRecordKeyClick()

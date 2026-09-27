@@ -21,6 +21,15 @@ object DumlCmdSet {
     const val BATTERY: Int = 0x06
     const val WIFI: Int = 0x07
     const val STREAMING: Int = 0x08
+    const val WAKE: Int = 0x53
+}
+
+object DumlGeneralCmd {
+    const val SESSION_WAKE_KEEPALIVE: Int = 0x2b
+}
+
+object DumlWakeCmd {
+    const val WAKE_CAMERA: Int = 0x10
 }
 
 object DumlWifiCmd {
@@ -44,4 +53,6 @@ object DumlTargets {
     const val APP_TO_GIMBAL: Int = 0x0402
     const val APP_TO_WIFI: Int = 0x0702
     const val APP_TO_STREAMING: Int = 0x0802
+    const val APP_TO_SESSION: Int = 0xF002
+    const val APP_TO_WAKE: Int = 0x1C02
 }

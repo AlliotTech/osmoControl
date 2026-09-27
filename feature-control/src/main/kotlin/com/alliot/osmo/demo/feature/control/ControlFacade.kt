@@ -23,4 +23,5 @@ class ControlFacade(
     suspend fun subscribeStatus() = sessionController.subscribeStatus()
     suspend fun sleep() = sessionController.sleep()
     suspend fun wake() = sessionController.wake()
+    suspend fun wakeViaGatt() = sessionController.wakeViaGatt()
 }

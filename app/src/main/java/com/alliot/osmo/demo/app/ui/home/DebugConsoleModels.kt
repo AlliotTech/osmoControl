@@ -31,6 +31,7 @@ enum class DebugConsoleActionType {
     WAKE,
     SWITCH_MODE,
     WAKE_AND_SNAPSHOT,
+    GATT_WAKE,
     RECORD_KEY,
     QS_KEY,
     SNAPSHOT_KEY,
@@ -115,6 +116,10 @@ fun mapDebugConsoleUiModel(state: DebugHomeState): DebugConsoleUiModel {
     val canSendProtocol = state.selectedMode == SessionTransportMode.FAKE || session.protocolReady
     val baseControlEnabled = !busy && canSendProtocol
     val wakeEnabled = !busy && canWakeFromDebugConsole(state)
+    val gattWakeEnabled = !busy && (state.selectedMode == SessionTransportMode.FAKE ||
+        (session.connectedDevice != null &&
+            state.prerequisites.bluetoothPermissionsGranted &&
+            session.bluetoothEnabled))
     val presetCommandsAvailable = capabilities?.supportsDebugConsole ?: true
 
     if (!presetCommandsAvailable) {
@@ -136,6 +141,7 @@ fun mapDebugConsoleUiModel(state: DebugHomeState): DebugConsoleUiModel {
         addIfSupported(DebugConsoleActionType.SUBSCRIBE_STATUS, "订阅状态", capabilities, DeviceCapabilities::supportsStateSubscribe, baseControlEnabled)
         addIfSupported(DebugConsoleActionType.SLEEP, "休眠", capabilities, DeviceCapabilities::supportsSleep, baseControlEnabled)
         addIfSupported(DebugConsoleActionType.WAKE, "唤醒", capabilities, DeviceCapabilities::supportsWake, wakeEnabled)
+        addIfSupported(DebugConsoleActionType.GATT_WAKE, "GATT 唤醒", capabilities, DeviceCapabilities::supportsWake, gattWakeEnabled)
     }
     val modeActions = buildList {
         if (capabilities == null || capabilities.supportsModeSwitch) {
