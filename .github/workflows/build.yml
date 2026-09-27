@@ -4,6 +4,11 @@ on:
   push:
     branches: ["**"]
   pull_request:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -37,3 +42,12 @@ jobs:
         with:
           name: app-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Attach APK to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK="app/build/outputs/apk/debug/osmoControl-${{ github.event.release.tag_name }}.apk"
+          mv app/build/outputs/apk/debug/app-debug.apk "$APK"
+          gh release upload "${{ github.event.release.tag_name }}" "$APK" --clobber
