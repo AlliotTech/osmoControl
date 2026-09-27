@@ -29,7 +29,7 @@ fun DebugHomeScreen(
         onSetGpsLocationRequestFrequencyHz = viewModel::setGpsLocationRequestFrequencyHz,
         onPushSampleGps = viewModel::pushSampleGps,
         onSleep = viewModel::sleep,
-        onWake = viewModel::wake,
+        onWake = viewModel::wakeViaGatt,
         onWakeAndSnapshot = viewModel::wakeAndSnapshot,
         onRequestVersion = viewModel::requestVersion,
         onSendQsKeyClick = viewModel::sendQsKeyClick,
