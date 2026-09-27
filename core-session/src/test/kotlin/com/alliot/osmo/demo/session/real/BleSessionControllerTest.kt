@@ -4,6 +4,11 @@ import com.alliot.osmo.demo.ble.BleClient
 import com.alliot.osmo.demo.ble.BleConnectionState
 import com.alliot.osmo.demo.ble.BleEvent
 import com.alliot.osmo.demo.ble.BleScanResult
+import com.alliot.osmo.demo.protocol.duml.DumlCmdSet
+import com.alliot.osmo.demo.protocol.duml.DumlFlags
+import com.alliot.osmo.demo.protocol.duml.DumlFrame
+import com.alliot.osmo.demo.protocol.duml.DumlFrameCodec
+import com.alliot.osmo.demo.protocol.duml.DumlWifiCmd
 import com.alliot.osmo.demo.protocol.frame.DjiFrame
 import com.alliot.osmo.demo.protocol.frame.DjiFrameCodec
 import com.alliot.osmo.demo.protocol.payload.CameraConnectionConfirmationPayload
@@ -814,6 +819,12 @@ class BleSessionControllerTest {
 
 internal class FakeBleClient(
     private val localAdapterAddress: String = randomMacAddress(),
+    /**
+     * When non-null, automatically answers a DUML 0x07/0x45 SetPairingPIN request
+     * with a pairing-status response carrying this status byte, like a real camera
+     * does (0x01 already paired, 0x02 approval required). Null disables it.
+     */
+    private val autoPairingStatus: Int? = 0x01,
 ) : BleClient {
     private val _scanResults = MutableStateFlow(
         listOf(BleScanResult("Osmo Action 5 Pro", "AA:BB:CC:DD:EE:01", -40)),
@@ -870,6 +881,27 @@ internal class FakeBleClient(
     override suspend fun write(bytes: ByteArray) {
         writes += bytes
         _events.emit(BleEvent.Write(bytes))
+        autoPairingStatus?.let { status ->
+            val decoded = runCatching { DumlFrameCodec.decode(bytes) }.getOrNull()
+            if (decoded != null &&
+                decoded.cmdSet == DumlCmdSet.WIFI &&
+                decoded.cmdId == DumlWifiCmd.SET_PAIRING_PIN &&
+                decoded.flags == DumlFlags.REQUEST
+            ) {
+                emitNotification(
+                    DumlFrameCodec.encode(
+                        DumlFrame(
+                            target = 0x0207,
+                            messageId = decoded.messageId,
+                            flags = DumlFlags.RESPONSE,
+                            cmdSet = DumlCmdSet.WIFI,
+                            cmdId = DumlWifiCmd.SET_PAIRING_PIN,
+                            payload = byteArrayOf(0x00, status.toByte()),
+                        ),
+                    ),
+                )
+            }
+        }
     }
 
     override suspend fun startWakeAdvertising(reversedMac: ByteArray) {

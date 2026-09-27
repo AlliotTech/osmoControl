@@ -212,6 +212,10 @@ class BleSessionController(
             latestError = null,
         )
         bleClient.connect(device.macAddress)
+        // connect() returning means the transport is up (the real client suspends
+        // until GATT connects); record it directly so a fast drop can't slip past
+        // the state collector through StateFlow conflation.
+        lastTransportConnected = true
         appendLog(
             LogCategory.STATE,
             "Handshake identity device_id=0x${controllerDeviceId.toString(16)} mac=${formatMac(localControllerMac)} verify_mode=${_status.value.handshakeVerifyMode} verify_code=${verifyCode.toString().padStart(4, '0')}",
@@ -243,6 +247,7 @@ class BleSessionController(
         stopAutoGpsPush()
         postConnectBootstrapStarted = false
         bleClient.disconnect()
+        lastTransportConnected = false
         _status.value = SessionStatus(
             mode = SessionTransportMode.REAL,
             controllerDeviceId = controllerDeviceId,
@@ -523,6 +528,7 @@ class BleSessionController(
                 appendLog(LogCategory.ERROR, "GATT wake attempt $attempt: GATT connect failed.")
                 return false
             }
+            lastTransportConnected = true
         }
         val pairingWaiter = CompletableDeferred<Int>()
         pairingResultDeferred = pairingWaiter
@@ -926,11 +932,13 @@ class BleSessionController(
                 }
                 appendLog(LogCategory.BLE, "Pairing status: $meaning.")
                 if (status == GattWakeSequence.PAIR_STATUS_APPROVAL_REQUIRED) {
+                    // Approval arrives later as a 0x07/0x46 request; keep waiting for it.
                     _status.value = _status.value.copy(
                         lastWakeResult = "请在相机屏幕上确认配对",
                     )
+                } else {
+                    pairingResultDeferred?.complete(status)
                 }
-                pairingResultDeferred?.complete(status)
             }
             if (GattWakeSequence.isPairingApprovalFrame(frame)) {
                 appendLog(LogCategory.BLE, "Pairing approved by camera.")
