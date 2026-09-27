@@ -21,6 +21,8 @@ import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Log
 import com.alliot.osmo.demo.ble.BleClient
@@ -350,6 +352,9 @@ class AndroidBleClient(
         notifyCharacteristic = notify
         writeCharacteristic = write
         Log.d(TAG, "Service ready. notify=${notify.uuid} write=${write.uuid}")
+        // Bring-up order per osmosis: FFF4 CCCD -> FFF5 CCCD -> 01 00 to FFF4 value -> settle ~200ms.
+        // Missing any step: the camera ATT-acks every write and answers nothing.
+        // The chain continues in onDescriptorWrite / onCharacteristicWrite.
         gatt.setCharacteristicNotification(notify, true)
         if (!writeDescriptor(gatt, descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)) {
             failConnect("Failed to enable FFF4 notifications.")
@@ -482,11 +487,54 @@ class AndroidBleClient(
                 failConnect("Notification enable failed with status $status.")
                 return
             }
-            val address = gatt.device?.address ?: "unknown"
-            resolveConnect(address)
+            when (descriptor.characteristic?.uuid) {
+                REMOTE_NOTIFY_UUID -> {
+                    // FFF4 CCCD done -> subscribe FFF5 CCCD next.
+                    val writeChar = writeCharacteristic
+                    val writeCccd = writeChar?.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG_UUID)
+                    if (writeChar == null || writeCccd == null) {
+                        failConnect("FFF5 notification descriptor 0x2902 is unavailable.")
+                        return
+                    }
+                    gatt.setCharacteristicNotification(writeChar, true)
+                    if (!writeDescriptor(gatt, writeCccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)) {
+                        failConnect("Failed to enable FFF5 notifications.")
+                    }
+                }
+                REMOTE_WRITE_UUID -> {
+                    // FFF5 CCCD done -> arm FFF4 by writing 01 00 to its value (with response).
+                    val notifyChar = notifyCharacteristic
+                    if (notifyChar == null) {
+                        failConnect("FFF4 characteristic lost during bring-up.")
+                        return
+                    }
+                    Log.d(TAG, "Bring-up: writing 01 00 to FFF4 value")
+                    if (!writeCharacteristic(gatt, notifyChar, byteArrayOf(0x01, 0x00))) {
+                        failConnect("Failed to arm FFF4.")
+                    }
+                }
+                else -> resolveConnect(gatt.device?.address ?: "unknown")
+            }
         }
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            if (characteristic.uuid == REMOTE_NOTIFY_UUID) {
+                // FFF4 arm (01 00) confirmed -> settle, then the link is ready.
+                Log.d(TAG, "onCharacteristicWrite status=$status FFF4 arm confirmed")
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    failConnect("FFF4 arm failed with status $status.")
+                    return
+                }
+                Handler(Looper.getMainLooper()).postDelayed({
+                    if (pendingConnect == null || bluetoothGatt !== gatt) {
+                        Log.d(TAG, "Bring-up settled but connect no longer pending; skipping resolve")
+                        return@postDelayed
+                    }
+                    Log.d(TAG, "Bring-up complete; resolving connect")
+                    resolveConnect(gatt.device?.address ?: "unknown")
+                }, BRING_UP_SETTLE_MS)
+                return
+            }
             if (characteristic.uuid != REMOTE_WRITE_UUID) return
             Log.d(TAG, "onCharacteristicWrite status=$status uuid=${characteristic.uuid}")
             if (status != BluetoothGatt.GATT_SUCCESS) {
@@ -523,11 +571,12 @@ class AndroidBleClient(
 
     private companion object {
         private const val TAG = "OsmoBle"
-        private const val REQUEST_MTU = 517
+        private const val REQUEST_MTU = 500 // osmosis: at 517 the camera stops answering every request
         private val REMOTE_SERVICE_UUID: UUID = uuid16(0xFFF0)
         private val REMOTE_NOTIFY_UUID: UUID = uuid16(0xFFF4)
         private val REMOTE_WRITE_UUID: UUID = uuid16(0xFFF5)
         private val CLIENT_CHARACTERISTIC_CONFIG_UUID: UUID = uuid16(0x2902)
+        private const val BRING_UP_SETTLE_MS = 200L
         private const val WAKE_MANUFACTURER_ID = 0x4B57
 
         private fun uuid16(shortUuid: Int): UUID =
