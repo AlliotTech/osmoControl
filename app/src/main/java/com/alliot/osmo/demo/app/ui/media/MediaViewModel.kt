@@ -315,6 +315,7 @@ class MediaViewModel(
             }
             apJoiner?.release()
             apJoiner = null
+            runCatching { sessionController?.releaseMediaLink() }
             _state.update {
                 it.copy(
                     connection = MediaConnectionState.DISCONNECTED,
@@ -634,6 +635,7 @@ class MediaViewModel(
                     downloader = null
                     apJoiner?.release()
                     apJoiner = null
+                    runCatching { sessionController?.releaseMediaLink() }
                     wifiRejoins = 0
                     pendingResumePaths.clear()
                 }

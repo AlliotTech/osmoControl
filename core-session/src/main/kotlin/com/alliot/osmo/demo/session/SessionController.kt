@@ -40,5 +40,11 @@ interface SessionController {
      * Null when not connected/awake or the camera withholds them.
      */
     suspend fun fetchWifiCredentials(): WifiCredentials?
+
+    /**
+     * Stops the media keepalive and drops the media BLE link. Called when the media flow
+     * disconnects, so the persistent 0x00/0x2b keepalive doesn't outlive the offload.
+     */
+    suspend fun releaseMediaLink()
     suspend fun setHandshakeVerifyMode(mode: Int)
 }

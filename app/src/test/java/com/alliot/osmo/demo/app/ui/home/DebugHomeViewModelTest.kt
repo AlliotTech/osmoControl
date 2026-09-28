@@ -587,6 +587,10 @@ class DebugHomeViewModelTest {
             return null
         }
 
+        override suspend fun releaseMediaLink() {
+            recordedCalls += "releaseMediaLink"
+        }
+
         override suspend fun wakeViaGatt() {
             recordedCalls += "wakeViaGatt"
         }

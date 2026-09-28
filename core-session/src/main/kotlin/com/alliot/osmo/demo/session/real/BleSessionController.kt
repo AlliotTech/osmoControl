@@ -113,6 +113,7 @@ class BleSessionController(
     private var pairingResultDeferred: CompletableDeferred<Int>? = null
     private var wifiSsidDeferred: CompletableDeferred<String?>? = null
     private var wifiPasswordDeferred: CompletableDeferred<String?>? = null
+    private var mediaKeepaliveJob: Job? = null
     private var localControllerMac = DEFAULT_CONTROLLER_MAC
     private val rejectedDevicesInCurrentScan = mutableSetOf<String>()
     private var preserveRejectedStateOnDisconnect = false
@@ -248,6 +249,7 @@ class BleSessionController(
         clearPendingCommands()
         stopStatusWatchdog()
         stopAutoGpsPush()
+        stopMediaKeepalive()
         postConnectBootstrapStarted = false
         bleClient.disconnect()
         lastTransportConnected = false
@@ -642,14 +644,12 @@ class BleSessionController(
         val passWaiter = CompletableDeferred<String?>()
         wifiSsidDeferred = ssidWaiter
         wifiPasswordDeferred = passWaiter
-        // Keep the paired link alive with 0x00/0x2b `01 01` ~1 Hz (an idle paired link is dropped
-        // after ~5-6 s, and the bring-up + credential reads take longer than that).
-        val keepaliveJob = scope.launch {
-            while (isActive) {
-                delay(GATT_WAKE_KEEPALIVE_INTERVAL_MS)
-                runCatching { writeDuml(GattWakeSequence.buildSessionKeepaliveFrame(GattWakeSequence.MSG_ID_SESSION)) }
-            }
-        }
+        // Keep the paired link alive with 0x00/0x2b `01 01` ~1 Hz. An idle paired link is dropped
+        // after ~5-6 s and the camera tears its Wi-Fi AP down with it — so this must run for the whole
+        // media session, not just the credential read. It is handed off persistently on success and
+        // stopped by [releaseMediaLink]; here it is stopped only on failure.
+        startMediaKeepalive()
+        var success = false
         return try {
             // Mirror osmosis' Mimo BLE bring-up, fired on a schedule and NOT gated on a pairing reply
             // (an already-connected Osmo does not re-answer 0x07/0x45, so awaiting it just stalls):
@@ -681,15 +681,42 @@ class BleSessionController(
             val wpa3 = ssid.contains("360", ignoreCase = true) ||
                 (deviceName?.contains("360", ignoreCase = true) == true)
             appendLog(LogCategory.BLE, "Wi-Fi creds retrieved over BLE for \"$ssid\" (wpa3=$wpa3).")
+            success = true
             WifiCredentials(ssid = ssid, password = password, wpa3 = wpa3)
         } catch (e: Exception) {
             appendLog(LogCategory.ERROR, "Wi-Fi creds fetch failed: ${e.message}")
             null
         } finally {
-            keepaliveJob.cancel()
             if (wifiSsidDeferred === ssidWaiter) wifiSsidDeferred = null
             if (wifiPasswordDeferred === passWaiter) wifiPasswordDeferred = null
+            if (!success) stopMediaKeepalive()
         }
+    }
+
+    /** Persistent ~1 Hz `0x00/0x2b` keepalive that holds the camera's paired session — and thus its
+     *  Wi-Fi AP — up for the whole media offload. Started once creds are read, stopped by
+     *  [releaseMediaLink]. Idempotent. */
+    private fun startMediaKeepalive() {
+        if (mediaKeepaliveJob?.isActive == true) return
+        mediaKeepaliveJob = scope.launch {
+            while (isActive) {
+                delay(GATT_WAKE_KEEPALIVE_INTERVAL_MS)
+                runCatching { writeDuml(GattWakeSequence.buildSessionKeepaliveFrame(GattWakeSequence.MSG_ID_SESSION)) }
+            }
+        }
+    }
+
+    private fun stopMediaKeepalive() {
+        mediaKeepaliveJob?.cancel()
+        mediaKeepaliveJob = null
+    }
+
+    override suspend fun releaseMediaLink() {
+        stopMediaKeepalive()
+        manualDisconnectRequested = true
+        reconnectJob?.cancel()
+        runCatching { bleClient.disconnect() }
+        appendLog(LogCategory.BLE, "Media link released (keepalive stopped, BLE disconnected).")
     }
 
     /** Media-initiated BLE scan for a supported Osmo; strongest camera's MAC, or null on timeout. */

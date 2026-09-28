@@ -310,6 +310,10 @@ class FakeSessionController : SessionController {
         return null
     }
 
+    override suspend fun releaseMediaLink() {
+        appendLog(LogCategory.STATE, "Fake controller: media link released.")
+    }
+
     override suspend fun setHandshakeVerifyMode(mode: Int) {
         _status.value = _status.value.copy(handshakeVerifyMode = mode)
         appendLog(LogCategory.STATE, "Fake handshake verify_mode set to $mode")
