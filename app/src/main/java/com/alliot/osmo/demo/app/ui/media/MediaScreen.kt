@@ -177,32 +177,81 @@ fun MediaScreen(
 @Composable
 private fun ConnectCard(state: MediaUiState, viewModel: MediaViewModel) {
     HomeSectionCard(title = "相机连接") {
-        Text(
-            text = "点“连接并加载”会自动扫描并连接相机、读取相机 Wi-Fi 并入网、载入相册，" +
-                "全程独立于工作台，无需先连蓝牙、也无需填写任何信息。",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        HomeFilledButton(
-            onClick = viewModel::connectAndLoad,
-            enabled = state.connection != MediaConnectionState.CONNECTING && !state.isLoading,
-            kind = HomeHapticKind.PRIMARY,
-        ) {
-            Text(if (state.connection == MediaConnectionState.CONNECTING) "连接中…" else "连接并加载")
-        }
-        val status = state.connectionError ?: state.status
-        if (status != null) {
+        if (state.scanning) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(modifier = Modifier.height(18.dp).width(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "正在扫描相机，请选择要连接的相机…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Spacer(modifier = Modifier.height(8.dp))
+            if (state.scannedDevices.isEmpty()) {
+                Text(
+                    text = "未发现相机。确认相机已开机、蓝牙已开启并在附近。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                state.scannedDevices.forEach { device ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { viewModel.connectDevice(device) }
+                            .padding(vertical = 10.dp, horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = device.name.ifBlank { "未命名相机" },
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                text = device.macAddress,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Text(text = "连接", color = MaterialTheme.colorScheme.primary)
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            HomeOutlinedButton(onClick = viewModel::cancelScan, kind = HomeHapticKind.SECONDARY) {
+                Text("取消扫描")
+            }
+        } else {
             Text(
-                text = status,
+                text = "点“连接并加载”会自动扫描相机蓝牙并列出，选定后自动读取相机 Wi-Fi 并入网、载入相册，" +
+                    "全程独立于工作台，无需先连蓝牙、也无需填写任何信息。",
                 style = MaterialTheme.typography.bodySmall,
-                color = if (state.connection == MediaConnectionState.FAILED) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            Spacer(modifier = Modifier.height(8.dp))
+            HomeFilledButton(
+                onClick = viewModel::connectAndLoad,
+                enabled = state.connection != MediaConnectionState.CONNECTING && !state.isLoading,
+                kind = HomeHapticKind.PRIMARY,
+            ) {
+                Text(if (state.connection == MediaConnectionState.CONNECTING) "连接中…" else "连接并加载")
+            }
+            val status = state.connectionError ?: state.status
+            if (status != null) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = status,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (state.connection == MediaConnectionState.FAILED) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
         }
     }
 }

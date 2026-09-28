@@ -24,7 +24,9 @@ import com.alliot.osmo.demo.media.exif.EmbeddedJpeg
 import com.alliot.osmo.demo.media.model.MediaStore
 import com.alliot.osmo.demo.media.repo.MediaRepository
 import com.alliot.osmo.demo.session.SessionController
+import com.alliot.osmo.demo.session.model.SessionDevice
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -82,6 +84,10 @@ data class MediaUiState(
     /** path -> full-resolution still JPEG bytes for the viewer; null = fetching, missing = not requested. */
     val fullImages: Map<String, ByteArray?> = emptyMap(),
     val deleteCandidate: MediaRow? = null,
+    /** True while a BLE scan for cameras is running and the picker is shown. */
+    val scanning: Boolean = false,
+    /** Cameras discovered in the current scan, for the user to pick from. */
+    val scannedDevices: List<SessionDevice> = emptyList(),
 )
 
 /** One page per store from [MediaRepository.listNewest]. */
@@ -122,6 +128,7 @@ class MediaViewModel(
     private var repository: MediaRepository? = null
     private var downloader: DownloadManager? = null
     private var apJoiner: CameraApJoiner? = null
+    private var scanJob: Job? = null
     private var wifiRejoins = 0
     private val pendingResumePaths = mutableSetOf<String>()
 
@@ -138,12 +145,60 @@ class MediaViewModel(
         }
     }
 
+    /**
+     * Entry from the connect button. Reuses a live workbench link; otherwise starts a BLE scan and
+     * lets the user pick which camera to connect ([connectDevice]).
+     */
     fun connectAndLoad() {
-        if (_state.value.connection == MediaConnectionState.CONNECTING ||
-            _state.value.isLoading
-        ) {
+        if (_state.value.connection == MediaConnectionState.CONNECTING || _state.value.isLoading) return
+        if (sessionController?.status?.value?.protocolReady == true) {
+            runConnect(chosen = null)
+        } else {
+            beginScan()
+        }
+    }
+
+    /** Start scanning and stream discovered cameras into the UI for the user to choose from. */
+    private fun beginScan() {
+        val controller = sessionController ?: run {
+            _state.update {
+                it.copy(connection = MediaConnectionState.FAILED, status = "当前为模拟模式，媒体功能需要真实相机。")
+            }
             return
         }
+        scanJob?.cancel()
+        _state.update {
+            it.copy(
+                scanning = true,
+                scannedDevices = emptyList(),
+                connectionError = null,
+                status = "正在扫描相机蓝牙，请从下方选择要连接的相机 …",
+            )
+        }
+        scanJob = viewModelScope.launch {
+            runCatching { controller.startScan() }
+            controller.devices.collect { list -> _state.update { it.copy(scannedDevices = list) } }
+        }
+    }
+
+    /** User picked a camera from the scan list: stop scanning and run the full connect + load. */
+    fun connectDevice(device: SessionDevice) {
+        scanJob?.cancel()
+        scanJob = null
+        viewModelScope.launch { runCatching { sessionController?.stopScan() } }
+        _state.update { it.copy(scanning = false, scannedDevices = emptyList()) }
+        runConnect(chosen = device)
+    }
+
+    /** Abort the scan without connecting. */
+    fun cancelScan() {
+        scanJob?.cancel()
+        scanJob = null
+        viewModelScope.launch { runCatching { sessionController?.stopScan() } }
+        _state.update { it.copy(scanning = false, scannedDevices = emptyList(), status = "已取消扫描。") }
+    }
+
+    private fun runConnect(chosen: SessionDevice?) {
         wifiRejoins = 0
         pendingResumePaths.clear()
         _state.update {
@@ -158,7 +213,7 @@ class MediaViewModel(
             val outcome: Result<LoadedPages> = withContext(Dispatchers.IO) {
                 try {
                     stackMutex.withLock {
-                        joinWifiIfNeeded()
+                        joinWifiIfNeeded(chosen)
                         transport?.close()
                         val t = DatalinkTransport(log = { Log.d(LOG_TAG, "datalink: $it") })
                         check(t.open(cameraIp, pairingIdentifier)) { "UDP datalink 握手失败" }
@@ -224,7 +279,7 @@ class MediaViewModel(
                             connection = MediaConnectionState.FAILED,
                             connectionError = e.message ?: "连接失败",
                             isLoading = false,
-                            status = "连接失败：${e.message ?: "未知错误"}。请确认手机已连上相机 Wi-Fi，且 IP 正确。",
+                            status = "连接失败：${e.message ?: "未知错误"}。",
                         )
                     }
                 },
@@ -234,10 +289,10 @@ class MediaViewModel(
 
     /**
      * Ensures a live BLE/DUML session to the camera so [joinWifiIfNeeded] can read its Wi-Fi
-     * credentials - reusing the workbench link when it's already up, otherwise scanning,
-     * connecting to the nearest camera and waking it, all from this screen (no workbench trip).
+     * credentials - reusing a live workbench link, otherwise connecting the user-[chosen] camera
+     * (picked from the scan list) and waking it, all from this screen (no workbench trip).
      */
-    private suspend fun ensureCameraSession() {
+    private suspend fun ensureCameraSession(chosen: SessionDevice?) {
         val controller = sessionController
             ?: throw IllegalStateException("当前为模拟模式，媒体功能需要真实相机。")
         val now = controller.status.value
@@ -248,19 +303,10 @@ class MediaViewModel(
             awaitReadyAwake(controller, "唤醒相机超时，请重试。")
             return
         }
-        _state.update { it.copy(status = "正在扫描相机蓝牙 …") }
-        controller.startScan()
-        try {
-            val device = withTimeoutOrNull(SCAN_TIMEOUT_MS) {
-                controller.devices.first { list -> list.any { it.workbenchSupported } }
-                    .first { it.workbenchSupported }
-            } ?: throw IllegalStateException("未扫描到相机，请确认相机已开机、蓝牙已开启并在附近。")
-            _state.update { it.copy(status = "正在连接「${device.name}」蓝牙 …") }
-            controller.connect(device)
-            awaitReadyAwake(controller, "相机连接超时，请重试或在工作台确认配对。")
-        } finally {
-            runCatching { controller.stopScan() }
-        }
+        val device = chosen ?: throw IllegalStateException("请先选择要连接的相机。")
+        _state.update { it.copy(status = "正在连接「${device.name}」蓝牙 …") }
+        controller.connect(device)
+        awaitReadyAwake(controller, "相机连接超时，请重试或在工作台确认配对。")
     }
 
     /** Waits until the session is protocol-ready and awake, waking once if it comes up sleeping. */
@@ -288,8 +334,8 @@ class MediaViewModel(
      * that AP and binds the process ([CameraApJoiner]) before any socket opens. No manual entry;
      * throws with a user-facing message when a step fails, surfaced on the caller's failure path.
      */
-    private suspend fun joinWifiIfNeeded() {
-        ensureCameraSession()
+    private suspend fun joinWifiIfNeeded(chosen: SessionDevice?) {
+        ensureCameraSession(chosen)
         val creds = runCatching { sessionController?.fetchWifiCredentials() }
             .onFailure { Log.w(LOG_TAG, "fetchWifiCredentials threw", it) }
             .getOrNull()
@@ -753,6 +799,8 @@ class MediaViewModel(
     }
 
     fun disconnect() {
+        scanJob?.cancel()
+        scanJob = null
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 stackMutex.withLock {
@@ -777,6 +825,8 @@ class MediaViewModel(
                     thumbnails = emptyMap(),
                     fullImages = emptyMap(),
                     processing = emptySet(),
+                    scanning = false,
+                    scannedDevices = emptyList(),
                     status = "已断开。",
                 )
             }
@@ -810,8 +860,6 @@ class MediaViewModel(
         private const val HISTORY_DIR = "media-history"
         private const val WORK_DIR = "media"
         private const val WIFI_JOIN_TIMEOUT_MS = 30_000L
-        /** How long to wait for a camera to appear in the BLE scan before giving up. */
-        private const val SCAN_TIMEOUT_MS = 20_000L
         /** How long to wait for the BLE handshake to reach protocol-ready. */
         private const val CONNECT_TIMEOUT_MS = 25_000L
         /** AP rejoin attempts allowed per session before giving up (osmosis MAX_WIFI_REJOINS). */
