@@ -9,6 +9,7 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.concurrent.locks.ReentrantLock
 import kotlin.random.Random
 
 /**
@@ -59,7 +60,34 @@ class DatalinkTransport(
     private var cmdCounter: Int = 0
     private var dumlId: Int = 0
 
+    /**
+     * Serializes every use of the socket. The background [startKeepalive] beat and a foreground
+     * list/download must never `recvAll` the same socket at once, or the keepalive steals datagrams
+     * that belong to a manifest stream. Reentrant so a caller can nest sends inside one [exclusive].
+     */
+    private val ioLock = ReentrantLock()
+
+    @Volatile private var keepaliveThread: Thread? = null
+
+    /**
+     * Set once [enterPlayback] succeeds. The keepalive re-asserts playback every ~10 s: some bodies
+     * (Pocket 3) drop the mode ~1 s after entry unless kept, and a list query outside playback returns
+     * only the oldest few records ([MEDIA_PROTOCOL §1]).
+     */
+    @Volatile var playbackHeld: Boolean = false
+        private set
+
     val isOpen: Boolean get() = socket != null
+
+    /** Runs [block] with exclusive ownership of the socket (see [ioLock]). */
+    fun <T> exclusive(block: () -> T): T {
+        ioLock.lock()
+        try {
+            return block()
+        } finally {
+            ioLock.unlock()
+        }
+    }
 
     // ---- bring-up ----
 
@@ -117,7 +145,80 @@ class DatalinkTransport(
         log("datalink: registerApp sent")
     }
 
+    /**
+     * Continuous session keepalive — osmosis `CameraSession.startKeepAlive` parity. While the user
+     * browses, the UDP datalink is otherwise silent, and the camera drops the registered session
+     * (and tears its Wi-Fi AP down with it) after ~40-70 s of silence. Beat every ~300 ms under
+     * [ioLock] so it never races a list/download: drain to latch the peer's window cursors, echo a
+     * window ACK, and send the `0x00/0x88` app-presence frame ~1 Hz (every third beat). Idempotent;
+     * runs until [stopKeepalive] or [close]. Best-effort — errors are swallowed, the loop exits when
+     * the socket is gone.
+     */
+    fun startKeepalive() {
+        if (keepaliveThread != null) return
+        val t = Thread {
+            var tick = 0
+            while (!Thread.currentThread().isInterrupted && socket != null) {
+                ioLock.lock()
+                try {
+                    if (socket == null) break
+                    recvAll(80)
+                    if (tick % 3 == 0) {
+                        sendDuml(
+                            0x00, 0x88, APP_PRESENCE,
+                            target = targetFor(receiverType = 0x08, receiverId = 1), cmdType = 2,
+                        )
+                    }
+                    if (playbackHeld && tick % 33 == 0) {
+                        sendDuml(
+                            0x02, 0x0C, PLAYBACK_ENTER,
+                            target = DumlTargets.APP_TO_CAMERA, cmdType = 2,
+                        )
+                    }
+                    sendAck()
+                } catch (_: Exception) {
+                    // socket closing under us, or a transient send failure — retry next beat
+                } finally {
+                    ioLock.unlock()
+                }
+                try {
+                    Thread.sleep(300)
+                } catch (_: InterruptedException) {
+                    break
+                }
+                tick++
+            }
+        }
+        t.isDaemon = true
+        t.name = "datalink-keepalive"
+        keepaliveThread = t
+        t.start()
+    }
+
+    fun stopKeepalive() {
+        keepaliveThread?.interrupt()
+        keepaliveThread = null
+    }
+
+    /**
+     * Enter playback mode (`0x02/0x0C` `01 01 00 01`). The camera serves a complete media list only in
+     * playback; some bodies otherwise return a partial, oldest-first page. Best-effort and idempotent;
+     * the keepalive re-asserts it while [playbackHeld]. Reference: osmosis `enterPlaybackConfirmed`.
+     */
+    fun enterPlayback() {
+        exclusive {
+            if (socket == null) return@exclusive
+            sendDuml(0x02, 0x0C, PLAYBACK_ENTER, target = DumlTargets.APP_TO_CAMERA, cmdType = 2)
+            recvAll(200)
+            sendAck()
+        }
+        playbackHeld = true
+        log("datalink: entered playback (0x02/0x0c)")
+    }
+
     fun close() {
+        stopKeepalive()
+        playbackHeld = false
         runCatching { socket?.close() }
         socket = null
         peer = null
@@ -300,6 +401,9 @@ class DatalinkTransport(
         }
 
         private val APP_PRESENCE: ByteArray = hexToBytes("170046237c415050000000000002")
+
+        /** `0x02/0x0C` payload that enters/holds playback mode. */
+        private val PLAYBACK_ENTER: ByteArray = byteArrayOf(0x01, 0x01, 0x00, 0x01)
 
         private fun hexToBytes(hex: String): ByteArray =
             ByteArray(hex.length / 2) { i ->

@@ -40,17 +40,77 @@ class MediaRepository(
     private var internalCounter = 2
     private var deleteCounter = 1
 
-    /** Newest-first page of one store. */
-    fun listNewest(store: MediaStore): MediaPage {
+    // Lazy pagination: one cursor per store (the next older page's start), seeded by [listNewest].
+    // A store is "done" once a page yields no older handle or comes back short. osmosis parity:
+    // CameraSession.stepPagination / oldestHandle — the next cursor is the oldest (smallest, non-zero)
+    // delete handle on the page, strictly below the current cursor.
+    private var sdCursor = MediaListCodec.SD_CARD_CURSOR_NEWEST
+    private var internalCursor = MediaListCodec.INTERNAL_STORAGE_CURSOR_NEWEST
+    private var sdDone = false
+    private var internalDone = false
+
+    /**
+     * Enter playback so the camera serves a complete list (some bodies otherwise return only the
+     * oldest few records). Best-effort; the transport keepalive re-asserts it. Call once per session
+     * before the first list.
+     */
+    fun enterPlayback() = transport.enterPlayback()
+
+    /** True while [store] may still have an older page to fetch via [nextPage]. */
+    fun hasMore(store: MediaStore): Boolean = when (store) {
+        MediaStore.SD_CARD -> !sdDone
+        MediaStore.INTERNAL -> !internalDone
+    }
+
+    /**
+     * The next older page of [store], or null when the store is exhausted. Advances that store's
+     * cursor to the oldest handle strictly below the current one; a short or handle-less page ends it.
+     */
+    fun nextPage(store: MediaStore): MediaPage? {
+        if (!hasMore(store)) return null
         val counter = when (store) {
             MediaStore.SD_CARD -> sdCounter++
             MediaStore.INTERNAL -> internalCounter++
         }
         val cursor = when (store) {
+            MediaStore.SD_CARD -> sdCursor
+            MediaStore.INTERNAL -> internalCursor
+        }
+        val page = listPage(store, counter, cursor)
+        advance(store, cursor, page)
+        return page
+    }
+
+    /** Newest-first page of one store; also seeds this store's pagination cursor. */
+    fun listNewest(store: MediaStore): MediaPage {
+        val counter = when (store) {
+            MediaStore.SD_CARD -> sdCounter++
+            MediaStore.INTERNAL -> internalCounter++
+        }
+        val newest = when (store) {
             MediaStore.SD_CARD -> MediaListCodec.SD_CARD_CURSOR_NEWEST
             MediaStore.INTERNAL -> MediaListCodec.INTERNAL_STORAGE_CURSOR_NEWEST
         }
-        return listPage(store, counter, cursor)
+        when (store) {
+            MediaStore.SD_CARD -> { sdCursor = newest; sdDone = false }
+            MediaStore.INTERNAL -> { internalCursor = newest; internalDone = false }
+        }
+        val page = listPage(store, counter, newest)
+        advance(store, newest, page)
+        return page
+    }
+
+    /**
+     * Advance [store]'s cursor after a page: next = oldest non-zero handle strictly below [from].
+     * No such handle, or a short page (< [MediaListCodec.PAGE_SIZE]), means the store is exhausted.
+     */
+    private fun advance(store: MediaStore, from: Long, page: MediaPage) {
+        val next = page.items.map { it.handle }.filter { it != 0L && it < from }.minOrNull()
+        val done = next == null || page.items.size < MediaListCodec.PAGE_SIZE
+        when (store) {
+            MediaStore.SD_CARD -> { if (next != null) sdCursor = next; sdDone = done }
+            MediaStore.INTERNAL -> { if (next != null) internalCursor = next; internalDone = done }
+        }
     }
 
     /**
@@ -59,7 +119,7 @@ class MediaRepository(
      * [MediaListCodec.INTERNAL_STORAGE_CURSOR_NEWEST]; older pages need
      * the previous page's tail cursor (real-device TBD).
      */
-    fun listPage(store: MediaStore, counter: Int, cursor: Long): MediaPage {
+    fun listPage(store: MediaStore, counter: Int, cursor: Long): MediaPage = transport.exclusive {
         val payload = MediaListCodec.buildListQueryPayload(counter, cursor)
         transport.sendDuml(DumlCmdSet.GENERAL, DumlGeneralCmd.MEDIA_LIST_QUERY, payload)
 
@@ -86,7 +146,7 @@ class MediaRepository(
                         is MediaListCodec.ChunkEvent.PageComplete -> {
                             val items = MediaManifestParser.decodeManifest(event.manifest, store)
                             log("media: ${store.name} page complete: ${items.size} records")
-                            return MediaPage(items, tooEarly = false)
+                            return@exclusive MediaPage(items, tooEarly = false)
                         }
                         null -> {}
                     }
@@ -98,17 +158,17 @@ class MediaRepository(
                 if (manifest != null) {
                     val items = MediaManifestParser.decodeManifest(manifest, store)
                     log("media: ${store.name} page quiet-closed: ${items.size} records")
-                    return MediaPage(items, tooEarly = false)
+                    return@exclusive MediaPage(items, tooEarly = false)
                 }
                 break
             }
         }
         if (tooEarly) {
             log("media: ${store.name} answered d8 (too early) — wait and re-query")
-            return MediaPage(emptyList(), tooEarly = true)
+            return@exclusive MediaPage(emptyList(), tooEarly = true)
         }
         log("media: ${store.name} page timed out")
-        return MediaPage(emptyList(), tooEarly = false)
+        MediaPage(emptyList(), tooEarly = false)
     }
 
     /**
@@ -126,32 +186,34 @@ class MediaRepository(
             handles = items.map { it.handle },
             counter = deleteCounter++,
         )
-        val deadline = System.currentTimeMillis() + DELETE_TIMEOUT_MS
-        transport.sendDuml(DumlCmdSet.GENERAL, DumlGeneralCmd.MEDIA_DELETE, payload)
-        while (System.currentTimeMillis() < deadline) {
-            for (datagram in transport.recvAll(200)) {
-                for (frame in DatalinkCodec.scanV1Frames(datagram)) {
-                    if (frame.cmdSet == DumlCmdSet.GENERAL &&
-                        frame.cmdId == DumlGeneralCmd.MEDIA_DELETE &&
-                        frame.payload.isNotEmpty()
-                    ) {
-                        // The empty transport ACK is skipped — only the
-                        // real status word counts.
-                        val status = when {
-                            frame.payload.size >= 2 ->
-                                (frame.payload[0].toInt() and 0xFF) or
-                                    ((frame.payload[1].toInt() and 0xFF) shl 8)
-                            else -> frame.payload[0].toInt() and 0xFF
+        return transport.exclusive {
+            val deadline = System.currentTimeMillis() + DELETE_TIMEOUT_MS
+            transport.sendDuml(DumlCmdSet.GENERAL, DumlGeneralCmd.MEDIA_DELETE, payload)
+            while (System.currentTimeMillis() < deadline) {
+                for (datagram in transport.recvAll(200)) {
+                    for (frame in DatalinkCodec.scanV1Frames(datagram)) {
+                        if (frame.cmdSet == DumlCmdSet.GENERAL &&
+                            frame.cmdId == DumlGeneralCmd.MEDIA_DELETE &&
+                            frame.payload.isNotEmpty()
+                        ) {
+                            // The empty transport ACK is skipped — only the
+                            // real status word counts.
+                            val status = when {
+                                frame.payload.size >= 2 ->
+                                    (frame.payload[0].toInt() and 0xFF) or
+                                        ((frame.payload[1].toInt() and 0xFF) shl 8)
+                                else -> frame.payload[0].toInt() and 0xFF
+                            }
+                            log("media: delete status=0x%04x".format(status))
+                            return@exclusive status
                         }
-                        log("media: delete status=0x%04x".format(status))
-                        return status
                     }
                 }
+                transport.sendAck()
             }
-            transport.sendAck()
+            log("media: delete — no reply")
+            null
         }
-        log("media: delete — no reply")
-        return null
     }
 
     /**
@@ -161,29 +223,30 @@ class MediaRepository(
      * and ACK to keep the stream flowing. Null when none arrives within
      * [timeoutMs] — some bodies (e.g. the Nano) never send it.
      */
-    fun readStoresStatus(timeoutMs: Long = STORES_STATUS_TIMEOUT_MS): StoresStatusPayload? {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            for (datagram in transport.recvAll(200)) {
-                val frame = DatalinkTransport.findReplyFrame(
-                    datagram,
-                    DumlCmdSet.FILE_SYSTEM,
-                    DumlFileSystemCmd.STORES_STATUS,
-                ) ?: continue
-                val decoded = runCatching {
-                    DumlPayloadCodec.decode(frame.cmdSet, frame.cmdId, frame.flags, frame.payload)
-                }.getOrNull()
-                if (decoded is StoresStatusPayload) {
-                    log("media: stores status sd=${decoded.sdFreeMb}/${decoded.sdTotalMb}MB " +
-                        "internal=${decoded.internalFreeMb}/${decoded.internalTotalMb}MB")
-                    return decoded
+    fun readStoresStatus(timeoutMs: Long = STORES_STATUS_TIMEOUT_MS): StoresStatusPayload? =
+        transport.exclusive {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                for (datagram in transport.recvAll(200)) {
+                    val frame = DatalinkTransport.findReplyFrame(
+                        datagram,
+                        DumlCmdSet.FILE_SYSTEM,
+                        DumlFileSystemCmd.STORES_STATUS,
+                    ) ?: continue
+                    val decoded = runCatching {
+                        DumlPayloadCodec.decode(frame.cmdSet, frame.cmdId, frame.flags, frame.payload)
+                    }.getOrNull()
+                    if (decoded is StoresStatusPayload) {
+                        log("media: stores status sd=${decoded.sdFreeMb}/${decoded.sdTotalMb}MB " +
+                            "internal=${decoded.internalFreeMb}/${decoded.internalTotalMb}MB")
+                        return@exclusive decoded
+                    }
                 }
+                transport.sendAck()
             }
-            transport.sendAck()
+            log("media: no 0x02/0xdc stores status within ${timeoutMs}ms")
+            null
         }
-        log("media: no 0x02/0xdc stores status within ${timeoutMs}ms")
-        return null
-    }
 
     companion object {
         private const val PAGE_TIMEOUT_MS = 20_000L
