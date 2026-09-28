@@ -622,12 +622,10 @@ class BleSessionController(
         }
         val ssidWaiter = CompletableDeferred<String?>()
         val passWaiter = CompletableDeferred<String?>()
-        val pairingWaiter = CompletableDeferred<Int>()
         wifiSsidDeferred = ssidWaiter
         wifiPasswordDeferred = passWaiter
-        pairingResultDeferred = pairingWaiter
-        // Mimo's BLE session sequence keeps the paired link alive with 0x00/0x2b `01 01` ~1 Hz; the
-        // Nano drops an idle paired link after ~5-6 s, and reading creds takes longer than that.
+        // Keep the paired link alive with 0x00/0x2b `01 01` ~1 Hz (an idle paired link is dropped
+        // after ~5-6 s, and the bring-up + credential reads take longer than that).
         val keepaliveJob = scope.launch {
             while (isActive) {
                 delay(GATT_WAKE_KEEPALIVE_INTERVAL_MS)
@@ -635,34 +633,31 @@ class BleSessionController(
             }
         }
         return try {
-            // Mirror osmosis' Mimo BLE bring-up (OsmoCommands notes): session-open (0x00/0x2b `04 00`)
-            // -> pair (0x07/0x45 "osmo") -> wake (0x53/0x10, this is what turns the camera Wi-Fi AP on)
-            // -> read SSID/password (0x07/0x07, 0x07/0x0e). Without the pair the camera withholds the
-            // credentials; without the wake the AP never comes up, so a join/datalink can't succeed.
+            // Mirror osmosis' Mimo BLE bring-up, fired on a schedule and NOT gated on a pairing reply
+            // (an already-connected Osmo does not re-answer 0x07/0x45, so awaiting it just stalls):
+            // session-open (0x00/0x2b `04 00`) -> pair (0x07/0x45 "osmo", unlocks the creds) ->
+            // wake (0x53/0x10, turns the Wi-Fi AP on) -> read SSID (0x07/0x07) + password (0x07/0x0e).
+            // Replies land in [wifiSsidDeferred]/[wifiPasswordDeferred] via handleDumlNotification.
             writeDuml(GattWakeSequence.buildSessionOpenFrame(nextDumlMessageId()))
-            delay(wakeWriteSpacingMs)
+            delay(WIFI_STEP_SPACING_MS)
             writeDuml(GattWakeSequence.buildSetPairingPinFrame(nextDumlMessageId(), pairingIdentifierProvider()))
-            val pairStatus = withTimeoutOrNull(pairingTimeoutMs) { pairingWaiter.await() }
-            appendLog(
-                LogCategory.BLE,
-                "Wi-Fi creds: pairing ${pairStatus?.let { "status=0x%02x".format(it) } ?: "no reply"}.",
-            )
-            delay(wakeWriteSpacingMs)
+            delay(WIFI_STEP_SPACING_MS)
             writeDuml(GattWakeSequence.buildWakeCameraFrame(nextDumlMessageId()))
-            delay(wakeWriteSpacingMs)
+            delay(WIFI_STEP_SPACING_MS)
             writeDuml(GattWakeSequence.buildGetWifiSsidFrame(nextDumlMessageId()))
             delay(WIFI_QUERY_SPACING_MS)
             writeDuml(GattWakeSequence.buildGetWifiPasswordFrame(nextDumlMessageId()))
             val deviceName = _status.value.connectedDevice?.name
+            val password = withTimeoutOrNull(WIFI_CREDENTIALS_TIMEOUT_MS) { passWaiter.await() }
             val ssid = withTimeoutOrNull(WIFI_CREDENTIALS_TIMEOUT_MS) { ssidWaiter.await() }
                 ?.takeIf { it.isNotBlank() }
                 ?: deviceName
-            val password = withTimeoutOrNull(WIFI_CREDENTIALS_TIMEOUT_MS) { passWaiter.await() }
-            if (ssid.isNullOrBlank() || password.isNullOrBlank()) {
-                appendLog(
-                    LogCategory.BLE,
-                    "Wi-Fi creds incomplete (ssid=${ssid ?: "?"}, password=${if (password != null) "ok" else "?"}).",
-                )
+            if (password.isNullOrBlank()) {
+                appendLog(LogCategory.BLE, "Wi-Fi creds: camera returned no password (ssid=${ssid ?: "?"}).")
+                return null
+            }
+            if (ssid.isNullOrBlank()) {
+                appendLog(LogCategory.BLE, "Wi-Fi creds: camera returned no SSID.")
                 return null
             }
             val wpa3 = ssid.contains("360", ignoreCase = true) ||
@@ -676,7 +671,6 @@ class BleSessionController(
             keepaliveJob.cancel()
             if (wifiSsidDeferred === ssidWaiter) wifiSsidDeferred = null
             if (wifiPasswordDeferred === passWaiter) wifiPasswordDeferred = null
-            if (pairingResultDeferred === pairingWaiter) pairingResultDeferred = null
         }
     }
 
@@ -1827,6 +1821,7 @@ class BleSessionController(
         private const val COMMAND_TIMEOUT_MS = 3_000L
         private const val WIFI_CREDENTIALS_TIMEOUT_MS = 3_000L
         private const val WIFI_QUERY_SPACING_MS = 500L
+        private const val WIFI_STEP_SPACING_MS = 700L
     }
 
     private data class CommandKey(val cmdSet: Int, val cmdId: Int)
