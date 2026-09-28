@@ -595,6 +595,11 @@ class MediaViewModel(
             return
         }
         _state.update { it.copy(deleteCandidate = null, status = "正在从相机删除 ${row.item.name} …") }
+        Log.d(
+            LOG_TAG,
+            "delete: ${row.item.name} handle=0x${row.item.handle.toString(16)} shared=${row.item.handleShared} " +
+                "store=${row.item.store.index}",
+        )
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching { repo.delete(listOf(row.item)) }
@@ -618,6 +623,7 @@ class MediaViewModel(
                     }
                 },
                 onFailure = { e ->
+                    Log.w(LOG_TAG, "delete failed", e)
                     _state.update { it.copy(status = "删除失败：${e.message ?: "未知错误"}") }
                 },
             )

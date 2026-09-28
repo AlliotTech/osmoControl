@@ -3,17 +3,21 @@ package com.alliot.osmo.demo.app.ui.media
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
@@ -25,26 +29,33 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.alliot.osmo.demo.app.ui.home.HomeFilledButton
 import com.alliot.osmo.demo.app.ui.home.HomeHapticKind
 import com.alliot.osmo.demo.app.ui.home.HomeOutlinedButton
 import com.alliot.osmo.demo.app.ui.home.HomeSectionCard
 
+/**
+ * Media offload as an album/gallery: a thumbnail grid grouped by store, with a per-item detail
+ * dialog carrying the download / frame-capture / trim / delete actions. Connection is self-contained
+ * (scan + pure-DUML), so the top card only exposes connect / reload / disconnect.
+ */
 @Composable
 fun MediaScreen(
     viewModel: MediaViewModel,
@@ -52,24 +63,23 @@ fun MediaScreen(
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    var detailPath by remember { mutableStateOf<String?>(null) }
 
     LazyColumn(
         state = listState,
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item {
+        item(key = "connect") {
             HomeSectionCard(title = "相机连接") {
                 Text(
-                    text = "点“连接并加载”会自动扫描并连接相机、读取相机 Wi-Fi 并入网、载入媒体，" +
+                    text = "点“连接并加载”会自动扫描并连接相机、读取相机 Wi-Fi 并入网、载入相册，" +
                         "全程独立于工作台，无需先连蓝牙、也无需填写任何信息。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     HomeFilledButton(
                         onClick = viewModel::connectAndLoad,
                         enabled = state.connection != MediaConnectionState.CONNECTING && !state.isLoading,
@@ -103,50 +113,47 @@ fun MediaScreen(
         }
 
         if (state.isLoading) {
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center,
-                ) {
+            item(key = "loading") {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
                     CircularProgressIndicator()
                 }
             }
         }
 
         if (state.connection == MediaConnectionState.CONNECTED) {
-            item {
-                MediaStoreHeader(title = "SD 卡", count = state.sdItems.size)
+            if (state.sdItems.isEmpty() && state.internalItems.isEmpty()) {
+                item(key = "empty") {
+                    Text(
+                        text = "没有读到媒体条目。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
-            items(state.sdItems, key = { it.item.path }) { row ->
-                MediaRowCard(
-                    row = row,
-                    progress = state.downloadProgress[row.item.path],
-                    busy = state.processing.contains(row.item.path),
-                    onDownload = { viewModel.download(row) },
-                    onDelete = { viewModel.requestDelete(row) },
-                    onCapture = { viewModel.requestFrameCapture(row) },
-                    onTrim = { viewModel.requestTrim(row) },
-                    thumbnail = state.thumbnails[row.item.path],
-                    onRequestThumbnail = { viewModel.loadThumbnail(row) },
-                )
-            }
-            item {
-                MediaStoreHeader(title = "机身内存", count = state.internalItems.size)
-            }
-            items(state.internalItems, key = { it.item.path }) { row ->
-                MediaRowCard(
-                    row = row,
-                    progress = state.downloadProgress[row.item.path],
-                    busy = state.processing.contains(row.item.path),
-                    onDownload = { viewModel.download(row) },
-                    onDelete = { viewModel.requestDelete(row) },
-                    onCapture = { viewModel.requestFrameCapture(row) },
-                    onTrim = { viewModel.requestTrim(row) },
-                    thumbnail = state.thumbnails[row.item.path],
-                    onRequestThumbnail = { viewModel.loadThumbnail(row) },
-                )
-            }
+            mediaSection("SD 卡", state.sdItems, state, viewModel) { detailPath = it }
+            mediaSection("机身内存", state.internalItems, state, viewModel) { detailPath = it }
         }
+    }
+
+    // ---- per-item detail (album entry actions) ----
+    val detailRow = detailPath?.let { p ->
+        (state.sdItems + state.internalItems).firstOrNull { it.item.path == p }
+    }
+    if (detailRow != null) {
+        MediaDetailDialog(
+            row = detailRow,
+            thumbnail = state.thumbnails[detailRow.item.path],
+            progress = state.downloadProgress[detailRow.item.path],
+            busy = state.processing.contains(detailRow.item.path),
+            onDownload = { viewModel.download(detailRow) },
+            onCapture = { viewModel.requestFrameCapture(detailRow); detailPath = null },
+            onTrim = { viewModel.requestTrim(detailRow); detailPath = null },
+            onDelete = { viewModel.requestDelete(detailRow); detailPath = null },
+            onDismiss = { detailPath = null },
+        )
+    } else if (detailPath != null) {
+        // The item vanished (e.g. deleted) — close the stale sheet.
+        detailPath = null
     }
 
     val candidate = state.deleteCandidate
@@ -163,9 +170,7 @@ fun MediaScreen(
                 }
             },
             dismissButton = {
-                TextButton(onClick = viewModel::cancelDelete) {
-                    Text("取消")
-                }
+                TextButton(onClick = viewModel::cancelDelete) { Text("取消") }
             },
         )
     }
@@ -189,6 +194,36 @@ fun MediaScreen(
     }
 }
 
+private fun LazyListScope.mediaSection(
+    title: String,
+    rows: List<MediaRow>,
+    state: MediaUiState,
+    viewModel: MediaViewModel,
+    onOpen: (String) -> Unit,
+) {
+    if (rows.isEmpty()) return
+    item(key = "hdr_$title") { MediaStoreHeader(title = title, count = rows.size) }
+    val gridRows = rows.chunked(GRID_COLUMNS)
+    items(gridRows, key = { "row_${title}_${it.first().item.path}" }) { rowItems ->
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            rowItems.forEach { row ->
+                MediaTile(
+                    row = row,
+                    thumbnail = state.thumbnails[row.item.path],
+                    progress = state.downloadProgress[row.item.path],
+                    onRequestThumbnail = { viewModel.loadThumbnail(row) },
+                    onClick = { onOpen(row.item.path) },
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            repeat(GRID_COLUMNS - rowItems.size) { Spacer(modifier = Modifier.weight(1f)) }
+        }
+    }
+}
+
 @Composable
 private fun MediaStoreHeader(title: String, count: Int) {
     Text(
@@ -201,50 +236,116 @@ private fun MediaStoreHeader(title: String, count: Int) {
 }
 
 @Composable
-private fun MediaRowCard(
+private fun MediaTile(
     row: MediaRow,
+    thumbnail: ByteArray?,
+    progress: Float?,
+    onRequestThumbnail: () -> Unit,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    LaunchedEffect(row.item.path) { onRequestThumbnail() }
+    val bmp = remember(thumbnail) {
+        thumbnail?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
+    }
+    Box(
+        modifier = modifier
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .clickable { onClick() },
+    ) {
+        if (bmp != null) {
+            Image(
+                bitmap = bmp,
+                contentDescription = row.item.name,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        // type / duration badge
+        Text(
+            text = tileBadge(row),
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.White,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(6.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(Color.Black.copy(alpha = 0.55f))
+                .padding(horizontal = 5.dp, vertical = 2.dp),
+        )
+        if (row.downloaded) {
+            Text(
+                text = "✓ 已下载",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.9f))
+                    .padding(horizontal = 5.dp, vertical = 2.dp),
+            )
+        }
+        if (progress != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.35f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                CircularProgressIndicator(progress = { progress }, color = Color.White)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MediaDetailDialog(
+    row: MediaRow,
+    thumbnail: ByteArray?,
     progress: Float?,
     busy: Boolean,
     onDownload: () -> Unit,
-    onDelete: () -> Unit,
     onCapture: () -> Unit,
     onTrim: () -> Unit,
-    thumbnail: ByteArray?,
-    onRequestThumbnail: () -> Unit,
+    onDelete: () -> Unit,
+    onDismiss: () -> Unit,
 ) {
-    LaunchedEffect(row.item.path) { onRequestThumbnail() }
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+    val bmp = remember(thumbnail) {
+        thumbnail?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
+    }
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         ) {
-            val bmp = remember(thumbnail) {
-                thumbnail?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
-            }
-            if (bmp != null) {
-                Image(
-                    bitmap = bmp,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(RoundedCornerShape(6.dp)),
-                )
-            } else {
+            Column(modifier = Modifier.padding(16.dp)) {
                 Box(
                     modifier = Modifier
-                        .size(48.dp)
-                        .clip(RoundedCornerShape(6.dp))
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .clip(RoundedCornerShape(10.dp))
                         .background(MaterialTheme.colorScheme.surfaceVariant),
-                )
-            }
-            Column(modifier = Modifier.weight(1f)) {
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (bmp != null) {
+                        Image(
+                            bitmap = bmp,
+                            contentDescription = row.item.name,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    } else {
+                        Text(
+                            text = if (row.item.isVideo) "视频" else "照片",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(10.dp))
                 Text(
                     text = row.item.name,
                     style = MaterialTheme.typography.titleSmall,
@@ -256,48 +357,66 @@ private fun MediaRowCard(
                     text = mediaMetaLine(row),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
                 )
                 if (progress != null) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    LinearProgressIndicator(
-                        progress = { progress },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
                     Text(
                         text = "${(progress * 100).toInt()}%",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-            }
-            if (busy) {
-                Text(
-                    text = "处理中…",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                Column(horizontalAlignment = Alignment.End) {
-                    if (progress == null) {
-                        TextButton(onClick = onDownload) {
-                            Text(if (row.downloaded) "重下" else "下载")
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    HomeFilledButton(
+                        onClick = onDownload,
+                        enabled = progress == null && !busy,
+                        kind = HomeHapticKind.PRIMARY,
+                    ) {
+                        Text(if (row.downloaded) "重新下载" else "下载")
+                    }
+                    if (row.item.isVideo) {
+                        HomeOutlinedButton(onClick = onCapture, enabled = !busy, kind = HomeHapticKind.SECONDARY) {
+                            Text("抽帧")
                         }
-                        if (row.item.isVideo) {
-                            TextButton(onClick = onCapture) { Text("抽帧") }
-                            TextButton(onClick = onTrim) { Text("裁剪") }
+                        HomeOutlinedButton(onClick = onTrim, enabled = !busy, kind = HomeHapticKind.SECONDARY) {
+                            Text("裁剪")
                         }
                     }
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
                     if (row.canDelete) {
                         TextButton(onClick = onDelete) {
-                            Text("删除", color = MaterialTheme.colorScheme.error)
+                            Text("从相机删除", color = MaterialTheme.colorScheme.error)
                         }
+                    } else {
+                        Spacer(modifier = Modifier.width(1.dp))
                     }
+                    TextButton(onClick = onDismiss) { Text("关闭") }
+                }
+                if (!row.canDelete) {
+                    Text(
+                        text = if (row.downloaded) "该文件无可删除句柄，或已删除。" else "先下载并校验后才能从相机删除。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }
     }
+}
+
+/** Short badge shown on a tile: `▶ mm:ss` for a video, `照片` otherwise. */
+private fun tileBadge(row: MediaRow): String {
+    if (!row.item.isVideo) return "照片"
+    val s = row.item.durationSec
+    if (s <= 0) return "▶"
+    return "▶ %d:%02d".format(s / 60, s % 60)
 }
 
 @Composable
@@ -375,3 +494,5 @@ private fun TrimInputDialog(
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
+
+private const val GRID_COLUMNS = 3
