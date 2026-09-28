@@ -61,11 +61,8 @@ fun MediaScreen(
         item {
             HomeSectionCard(title = "相机连接") {
                 Text(
-                    text = if (state.cameraConnected) {
-                        "已通过蓝牙连上相机。点“连接并加载”将自动读取相机 Wi-Fi、入网并载入媒体，无需填写任何信息。"
-                    } else {
-                        "请先在“工作台”通过蓝牙连接相机，再回到这里加载媒体。"
-                    },
+                    text = "点“连接并加载”会自动扫描并连接相机、读取相机 Wi-Fi 并入网、载入媒体，" +
+                        "全程独立于工作台，无需先连蓝牙、也无需填写任何信息。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -75,8 +72,7 @@ fun MediaScreen(
                 ) {
                     HomeFilledButton(
                         onClick = viewModel::connectAndLoad,
-                        enabled = state.cameraConnected &&
-                            state.connection != MediaConnectionState.CONNECTING && !state.isLoading,
+                        enabled = state.connection != MediaConnectionState.CONNECTING && !state.isLoading,
                         kind = HomeHapticKind.PRIMARY,
                     ) {
                         Text(if (state.connection == MediaConnectionState.CONNECTED) "重新加载" else "连接并加载")

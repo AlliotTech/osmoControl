@@ -136,10 +136,6 @@ class MediaViewModel(
     }
 
     fun connectAndLoad() {
-        if (sessionController != null && !_state.value.cameraConnected) {
-            _state.update { it.copy(status = "请先在“工作台”通过蓝牙连接相机。") }
-            return
-        }
         if (_state.value.connection == MediaConnectionState.CONNECTING ||
             _state.value.isLoading
         ) {

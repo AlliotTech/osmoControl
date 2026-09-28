@@ -11,6 +11,18 @@ package com.alliot.osmo.demo.protocol.duml
 object GattWakeSequence {
     const val PAIRING_TOKEN_OSMO: String = "osmo"
 
+    /**
+     * The exact 16-bit message ids Mimo uses for the BLE session commands. Every one has the
+     * `0x8000` bit set: on a DJI camera that bit is the "response requested" flag, and an Osmo
+     * stays silent to a command whose id lacks it (observed on an Action 6 Pro — byte-identical
+     * frames with low ids drew zero replies; osmosis' 0x80xx ids draw the pairing/wifi answers).
+     */
+    const val MSG_ID_SESSION: Int = 0x802B
+    const val MSG_ID_PAIR: Int = 0x8092
+    const val MSG_ID_WAKE: Int = 0x8053
+    const val MSG_ID_WIFI_SSID: Int = 0x8007
+    const val MSG_ID_WIFI_PASSWORD: Int = 0x800E
+
     /** 0x07/0x45 response status: camera already remembers this identifier. */
     const val PAIR_STATUS_ALREADY_PAIRED: Int = 0x01
 

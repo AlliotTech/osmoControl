@@ -616,8 +616,8 @@ class BleSessionController(
     }
 
     override suspend fun fetchWifiCredentials(): WifiCredentials? {
-        val mac = _status.value.connectedDevice?.macAddress
-            ?: run { appendLog(LogCategory.BLE, "Wi-Fi creds: no connected camera."); return null }
+        val mac = (_status.value.connectedDevice?.macAddress ?: scanForCameraMac())
+            ?: run { appendLog(LogCategory.BLE, "Wi-Fi creds: no camera found to connect."); return null }
         // MEDIA INDEPENDENT (osmosis parity): an Osmo will not answer the Mimo DUML pairing/wake/Wi-Fi
         // commands while an R-SDK controller session (the 0xAA ConnectionRequest) owns the link —
         // observed on an Action 6 Pro, which ATT-acked every frame yet never replied. Drop the control
@@ -647,7 +647,7 @@ class BleSessionController(
         val keepaliveJob = scope.launch {
             while (isActive) {
                 delay(GATT_WAKE_KEEPALIVE_INTERVAL_MS)
-                runCatching { writeDuml(GattWakeSequence.buildSessionKeepaliveFrame(nextDumlMessageId())) }
+                runCatching { writeDuml(GattWakeSequence.buildSessionKeepaliveFrame(GattWakeSequence.MSG_ID_SESSION)) }
             }
         }
         return try {
@@ -656,15 +656,15 @@ class BleSessionController(
             // session-open (0x00/0x2b `04 00`) -> pair (0x07/0x45 "osmo", unlocks the creds) ->
             // wake (0x53/0x10, turns the Wi-Fi AP on) -> read SSID (0x07/0x07) + password (0x07/0x0e).
             // Replies land in [wifiSsidDeferred]/[wifiPasswordDeferred] via handleDumlNotification.
-            writeDuml(GattWakeSequence.buildSessionOpenFrame(nextDumlMessageId()))
+            writeDuml(GattWakeSequence.buildSessionOpenFrame(GattWakeSequence.MSG_ID_SESSION))
             delay(WIFI_STEP_SPACING_MS)
-            writeDuml(GattWakeSequence.buildSetPairingPinFrame(nextDumlMessageId(), pairingIdentifierProvider()))
+            writeDuml(GattWakeSequence.buildSetPairingPinFrame(GattWakeSequence.MSG_ID_PAIR, pairingIdentifierProvider()))
             delay(WIFI_STEP_SPACING_MS)
-            writeDuml(GattWakeSequence.buildWakeCameraFrame(nextDumlMessageId()))
+            writeDuml(GattWakeSequence.buildWakeCameraFrame(GattWakeSequence.MSG_ID_WAKE))
             delay(WIFI_STEP_SPACING_MS)
-            writeDuml(GattWakeSequence.buildGetWifiSsidFrame(nextDumlMessageId()))
+            writeDuml(GattWakeSequence.buildGetWifiSsidFrame(GattWakeSequence.MSG_ID_WIFI_SSID))
             delay(WIFI_QUERY_SPACING_MS)
-            writeDuml(GattWakeSequence.buildGetWifiPasswordFrame(nextDumlMessageId()))
+            writeDuml(GattWakeSequence.buildGetWifiPasswordFrame(GattWakeSequence.MSG_ID_WIFI_PASSWORD))
             val deviceName = _status.value.connectedDevice?.name
             val password = withTimeoutOrNull(WIFI_CREDENTIALS_TIMEOUT_MS) { passWaiter.await() }
             val ssid = withTimeoutOrNull(WIFI_CREDENTIALS_TIMEOUT_MS) { ssidWaiter.await() }
@@ -689,6 +689,27 @@ class BleSessionController(
             keepaliveJob.cancel()
             if (wifiSsidDeferred === ssidWaiter) wifiSsidDeferred = null
             if (wifiPasswordDeferred === passWaiter) wifiPasswordDeferred = null
+        }
+    }
+
+    /** Media-initiated BLE scan for a supported Osmo; strongest camera's MAC, or null on timeout. */
+    private suspend fun scanForCameraMac(): String? {
+        appendLog(LogCategory.BLE, "Wi-Fi creds: scanning for a camera…")
+        runCatching { bleClient.startScan() }
+        return try {
+            withTimeoutOrNull(MEDIA_SCAN_TIMEOUT_MS) {
+                var mac: String? = null
+                while (mac == null) {
+                    mac = bleClient.scanResults.value
+                        .filter { isSupportedCamera(it) }
+                        .maxByOrNull { it.rssi }
+                        ?.macAddress
+                    if (mac == null) delay(300)
+                }
+                mac
+            }
+        } finally {
+            runCatching { bleClient.stopScan() }
         }
     }
 
@@ -1841,6 +1862,7 @@ class BleSessionController(
         private const val WIFI_QUERY_SPACING_MS = 500L
         private const val WIFI_STEP_SPACING_MS = 700L
         private const val WIFI_RELINK_SETTLE_MS = 800L
+        private const val MEDIA_SCAN_TIMEOUT_MS = 8_000L
     }
 
     private data class CommandKey(val cmdSet: Int, val cmdId: Int)
