@@ -11,7 +11,8 @@ import androidx.lifecycle.viewModelScope
 import com.alliot.osmo.demo.app.di.AppContainer
 import com.alliot.osmo.demo.app.net.CameraApJoiner
 import com.alliot.osmo.demo.app.media.CameraFrameCapture
-import com.alliot.osmo.demo.app.media.GalleryStore
+import com.alliot.osmo.demo.app.OsmoDemoApplication
+import com.alliot.osmo.demo.app.media.DownloadCoordinator
 import com.alliot.osmo.demo.app.media.CameraTrimmedDownloader
 import com.alliot.osmo.demo.app.media.TrimRange
 import com.alliot.osmo.demo.media.datalink.DatalinkTransport
@@ -21,6 +22,8 @@ import com.alliot.osmo.demo.media.download.HistoryStore
 import com.alliot.osmo.demo.media.download.UrlConnectionHttpClient
 import com.alliot.osmo.demo.media.model.MediaItem
 import com.alliot.osmo.demo.media.exif.EmbeddedJpeg
+import com.alliot.osmo.demo.media.exif.ExifShooting
+import com.alliot.osmo.demo.media.exif.ShootingParams
 import com.alliot.osmo.demo.media.model.MediaStore
 import com.alliot.osmo.demo.media.repo.MediaRepository
 import com.alliot.osmo.demo.protocol.duml.StoresStatusPayload
@@ -49,6 +52,21 @@ enum class MediaConnectionState {
     CONNECTING,
     CONNECTED,
     FAILED,
+}
+
+/** Grid filter over the loaded records. Client-side; pagination still fetches every page. */
+enum class MediaFilter(val label: String) {
+    ALL("全部"),
+    VIDEO("视频"),
+    PHOTO("照片"),
+    FAVORITE("收藏");
+
+    fun accepts(row: MediaRow): Boolean = when (this) {
+        ALL -> true
+        VIDEO -> row.item.isVideo
+        PHOTO -> !row.item.isVideo
+        FAVORITE -> row.item.starred
+    }
 }
 
 /** One manifest record plus the local facts the UI needs. */
@@ -84,6 +102,8 @@ data class MediaUiState(
     val thumbnails: Map<String, ByteArray?> = emptyMap(),
     /** path -> full-resolution still JPEG bytes for the viewer; null = fetching, missing = not requested. */
     val fullImages: Map<String, ByteArray?> = emptyMap(),
+    /** path -> parsed EXIF shooting params; null = fetched/none, missing = not requested. */
+    val shootingParams: Map<String, ShootingParams?> = emptyMap(),
     val deleteCandidate: MediaRow? = null,
     /** True while a BLE scan for cameras is running and the picker is shown. */
     val scanning: Boolean = false,
@@ -91,6 +111,12 @@ data class MediaUiState(
     val scannedDevices: List<SessionDevice> = emptyList(),
     /** Per-store capacity from the camera's 0x02/0xDC push; null = not reported. */
     val storesStatus: StoresStatusPayload? = null,
+    /** At least one store still has an older page to fetch via [MediaViewModel.loadMore]. */
+    val canLoadMore: Boolean = false,
+    /** An older-page fetch is in flight. */
+    val loadingMore: Boolean = false,
+    /** Client-side grid filter. */
+    val filter: MediaFilter = MediaFilter.ALL,
 )
 
 /** One page per store from [MediaRepository.listNewest]. */
@@ -116,6 +142,8 @@ class MediaViewModel(
     private val pairingIdentifier: String,
     /** The live BLE session: source of the camera's Wi-Fi credentials and connection state. */
     private val sessionController: SessionController? = null,
+    /** Process-scoped background download queue (foreground service + notification). */
+    private val downloads: DownloadCoordinator? = null,
 ) : ViewModel() {
 
     private val filesDir: File = appContext.filesDir
@@ -147,7 +175,25 @@ class MediaViewModel(
                 }
             }
         }
+        // Mirror the background queue into the grid: live progress, and a ✓ for anything it finishes.
+        downloads?.let { coord ->
+            viewModelScope.launch {
+                coord.state.collect { q ->
+                    _state.update { st ->
+                        st.copy(
+                            downloadProgress = q.progress,
+                            sdItems = markDownloaded(st.sdItems, q.completed),
+                            internalItems = markDownloaded(st.internalItems, q.completed),
+                        )
+                    }
+                }
+            }
+        }
     }
+
+    private fun markDownloaded(rows: List<MediaRow>, completed: Set<String>): List<MediaRow> =
+        if (completed.isEmpty()) rows
+        else rows.map { if (!it.downloaded && it.item.path in completed) it.copy(downloaded = true) else it }
 
     /**
      * Entry from the connect button. Reuses a live workbench link; otherwise starts a BLE scan and
@@ -222,6 +268,7 @@ class MediaViewModel(
                         val t = DatalinkTransport(log = { Log.d(LOG_TAG, "datalink: $it") })
                         check(t.open(cameraIp, pairingIdentifier)) { "UDP datalink 握手失败" }
                         t.registerApp()
+                        t.startKeepalive()
                         val repo = MediaRepository(t)
                         val dl = DownloadManager(
                             http = UrlConnectionHttpClient(cameraIp),
@@ -232,6 +279,8 @@ class MediaViewModel(
                         transport = t
                         repository = repo
                         downloader = dl
+                        downloads?.configure(dl, cameraIp)
+                        repo.enterPlayback()
                         Result.success(
                             LoadedPages(
                                 sd = repo.listNewest(MediaStore.SD_CARD),
@@ -266,6 +315,9 @@ class MediaViewModel(
                             sdItems = sdRows,
                             internalItems = internalRows,
                             storesStatus = pages.stores,
+                            canLoadMore = repository?.run {
+                                hasMore(MediaStore.SD_CARD) || hasMore(MediaStore.INTERNAL)
+                            } ?: false,
                             status = hint
                                 ?: "已加载：SD 卡 ${sdRows.size} 项，机身内存 ${internalRows.size} 项。",
                         )
@@ -398,9 +450,11 @@ class MediaViewModel(
     }
 
     /**
-     * A rejoin succeeded (a second [CameraApJoiner] onNetwork): the process is rebound to
-     * the camera network, so HTTP works again. Keep the loaded grid and resume any
-     * downloads that were in flight when the AP dropped — each picks up from its `.part`.
+     * The camera AP came back after [onWifiLost]. WifiNetworkSpecifier hands us a fresh Network, so
+     * HTTP/UDP egress works again — but the old UDP datalink session died with the AP, so reopen it
+     * (handshake + register + keepalive) and rebuild the repository/downloader before touching the
+     * camera. Then reconcile the grid and resume any downloads that were in flight — each picks up
+     * from its `.part`.
      */
     private fun onWifiRejoined() {
         viewModelScope.launch {
@@ -408,11 +462,42 @@ class MediaViewModel(
             pendingResumePaths.clear()
             _state.update {
                 it.copy(
-                    status = if (resume.isEmpty()) "相机 Wi-Fi 已重连。"
-                    else "相机 Wi-Fi 已重连，正在恢复 ${resume.size} 个下载 …",
+                    status = "相机 Wi-Fi 已重连，正在重开数据链路 …",
+                    // Clear stale progress so download() doesn't treat these as already running.
+                    downloadProgress = it.downloadProgress - resume.toSet(),
                 )
             }
-            if (resume.isNotEmpty()) {
+            val reopened = withContext(Dispatchers.IO) {
+                runCatching {
+                    stackMutex.withLock {
+                        transport?.close()
+                        val t = DatalinkTransport(log = { Log.d(LOG_TAG, "datalink: $it") })
+                        check(t.open(cameraIp, pairingIdentifier)) { "UDP datalink 握手失败" }
+                        t.registerApp()
+                        t.startKeepalive()
+                        t.enterPlayback()
+                        transport = t
+                        repository = MediaRepository(t)
+                        val dl = DownloadManager(
+                            http = UrlConnectionHttpClient(cameraIp),
+                            history = history,
+                            workDir = workDir,
+                            log = { Log.d(LOG_TAG, "download: $it") },
+                        )
+                        downloader = dl
+                        downloads?.configure(dl, cameraIp)
+                    }
+                }.isSuccess
+            }
+            if (!reopened) {
+                _state.update { it.copy(status = "相机 Wi-Fi 已重连，但数据链路重开失败，请重新加载。") }
+                return@launch
+            }
+            reloadCurrentLists()
+            if (resume.isEmpty()) {
+                _state.update { it.copy(status = "相机 Wi-Fi 已重连。") }
+            } else {
+                _state.update { it.copy(status = "相机 Wi-Fi 已重连，正在恢复 ${resume.size} 个下载 …") }
                 val rows = _state.value.sdItems + _state.value.internalItems
                 resume.forEach { path ->
                     rows.firstOrNull { it.item.path == path }?.let { download(it) }
@@ -421,82 +506,34 @@ class MediaViewModel(
         }
     }
 
+    /** Enqueue one record for background download (foreground service + notification). */
     fun download(row: MediaRow) {
-        val path = row.item.path
-        if (_state.value.downloadProgress.containsKey(path)) return
-        val dl = downloader
-        if (dl == null) {
+        val coord = downloads
+        if (coord == null || downloader == null) {
             _state.update { it.copy(status = "请先连接相机。") }
             return
         }
-        _state.update {
-            it.copy(
-                downloadProgress = it.downloadProgress + (path to 0f),
-                status = "开始下载 ${row.item.name} …",
-            )
+        if (row.item.path in _state.value.downloadProgress) return
+        _state.update { it.copy(status = "已加入下载队列：${row.item.name}") }
+        coord.enqueue(listOf(row.item))
+    }
+
+    /** Enqueue every currently-filtered, not-yet-downloaded record; the coordinator runs them serially. */
+    fun downloadAll() {
+        val coord = downloads ?: run {
+            _state.update { it.copy(status = "请先连接相机。") }
+            return
         }
-        viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                runCatching {
-                    dl.download(
-                        cameraId = cameraIdFor(cameraIp),
-                        item = row.item,
-                    ) { soFar, total ->
-                        if (total != null && total > 0) {
-                            val fraction = (soFar.toFloat() / total).coerceIn(0f, 1f)
-                            _state.update {
-                                it.copy(downloadProgress = it.downloadProgress + (path to fraction))
-                            }
-                        }
-                    }
-                }
-            }
-            result.fold(
-                onSuccess = { r ->
-                    val cameraId = cameraIdFor(cameraIp)
-                    val savedToGallery = if (!r.skippedAsDuplicate &&
-                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
-                    ) {
-                        withContext(Dispatchers.IO) {
-                            runCatching {
-                                val uri = GalleryStore.publish(app, r.file, row.item.name, row.item.isVideo)
-                                if (uri != null) r.file.delete()
-                                uri != null
-                            }.getOrDefault(false)
-                        }
-                    } else {
-                        false
-                    }
-                    _state.update { s ->
-                        val refresh: (List<MediaRow>) -> List<MediaRow> = { rows ->
-                            rows.map { existing ->
-                                if (existing.item.path == path) existing.item.toRow(cameraId) else existing
-                            }
-                        }
-                        s.copy(
-                            downloadProgress = s.downloadProgress - path,
-                            sdItems = refresh(s.sdItems),
-                            internalItems = refresh(s.internalItems),
-                            status = when {
-                                r.skippedAsDuplicate -> "${row.item.name} 已下载过，跳过。"
-                                savedToGallery ->
-                                    "下载完成：${row.item.name}（${formatBytes(r.bytesWritten)}），已保存到系统相册。"
-                                else ->
-                                    "下载完成：${row.item.name}（${formatBytes(r.bytesWritten)}，SHA-256 已校验）。"
-                            },
-                        )
-                    }
-                },
-                onFailure = { e ->
-                    _state.update {
-                        it.copy(
-                            downloadProgress = it.downloadProgress - path,
-                            status = "下载失败：${e.message ?: "未知错误"}",
-                        )
-                    }
-                },
-            )
+        val filter = _state.value.filter
+        val pending = (_state.value.sdItems + _state.value.internalItems)
+            .filter { filter.accepts(it) && !it.downloaded && it.item.path !in _state.value.downloadProgress }
+            .map { it.item }
+        if (pending.isEmpty()) {
+            _state.update { it.copy(status = "没有需要下载的项。") }
+            return
         }
+        _state.update { it.copy(status = "已加入下载队列：${pending.size} 项。") }
+        coord.enqueue(pending)
     }
 
     // ---- remote frame capture (one full-res frame, no full download) ----
@@ -635,11 +672,16 @@ class MediaViewModel(
     }
 
     /**
-     * HTTP URL to stream [row] straight off the camera - full-res video for the player, or the
-     * full still. Uses the record's own store; playback falls back to nothing if that mount 404s.
+     * HTTP URL to stream [row] straight off the camera. For a video, prefer the camera's low-bitrate
+     * **proxy** ([MediaItem.proxyPath], e.g. `.LRF`/`.XRF`) so preview scrubs smoothly and cheaply,
+     * falling back to the full-res original when the body lists no proxy. Stills always use the
+     * original. Uses the record's own store; playback shows nothing if that mount 404s.
      */
-    fun playbackUrl(row: MediaRow): String =
-        "http://$cameraIp/v2?storage=${row.item.store.index}&path=${row.item.path}"
+    fun playbackUrl(row: MediaRow): String {
+        val item = row.item
+        val path = if (item.isVideo) item.proxyPath ?: item.path else item.path
+        return "http://$cameraIp/v2?storage=${item.store.index}&path=$path"
+    }
 
     /** Lazily fetch a still's full-resolution JPEG for the viewer. No-op for videos. Idempotent. */
     fun loadFullImage(row: MediaRow) {
@@ -658,6 +700,80 @@ class MediaViewModel(
             }?.takeIf { it.isNotEmpty() }
             if (bytes != null) {
                 _state.update { it.copy(fullImages = it.fullImages + (path to bytes)) }
+            }
+        }
+    }
+
+    /**
+     * Parse a still's EXIF shooting params (ISO / shutter / aperture / focal / EV) for the detail
+     * sheet. Reuses the full image if already fetched; otherwise pulls just the first 64 KB of the
+     * original (where EXIF's APP1 lives) — one small ranged GET, cached. No-op for videos, whose
+     * parameters live in the `djmd` track (not yet read).
+     */
+    fun loadShootingParams(row: MediaRow) {
+        val item = row.item
+        if (item.isVideo) return
+        val path = item.path
+        if (_state.value.shootingParams.containsKey(path)) return
+        val ip = cameraIp
+        _state.update { it.copy(shootingParams = it.shootingParams + (path to null)) }
+        viewModelScope.launch {
+            val params = withContext(Dispatchers.IO) {
+                val cached = _state.value.fullImages[path]
+                val head = cached ?: runCatching {
+                    val storage = downloader?.probe(item)?.first ?: item.store.index
+                    httpGetCapped(ip, "/v2?storage=$storage&path=${item.path}", EmbeddedJpeg.HEAD_BYTES.toLong())
+                }.getOrNull()
+                head?.let { runCatching { ExifShooting.parse(it) }.getOrNull() }
+            }
+            if (params != null) {
+                _state.update { it.copy(shootingParams = it.shootingParams + (path to params)) }
+            }
+        }
+    }
+
+    /**
+     * Fetch the next older page from every store that still has one, dedup against the loaded grid by
+     * store+path, and append. Drives the grid's infinite scroll. Serialized on [stackMutex]; the
+     * repository advances each store's cursor and reports when a store is exhausted.
+     */
+    fun loadMore() {
+        if (_state.value.loadingMore || !_state.value.canLoadMore) return
+        val repo = repository ?: return
+        _state.update { it.copy(loadingMore = true) }
+        viewModelScope.launch {
+            val cameraId = cameraIdFor(cameraIp)
+            val fetched = withContext(Dispatchers.IO) {
+                runCatching {
+                    stackMutex.withLock {
+                        val sd = if (repo.hasMore(MediaStore.SD_CARD)) {
+                            repo.nextPage(MediaStore.SD_CARD)?.items.orEmpty()
+                        } else {
+                            emptyList()
+                        }
+                        val internal = if (repo.hasMore(MediaStore.INTERNAL)) {
+                            repo.nextPage(MediaStore.INTERNAL)?.items.orEmpty()
+                        } else {
+                            emptyList()
+                        }
+                        sd to internal
+                    }
+                }.getOrElse {
+                    Log.w(LOG_TAG, "loadMore failed", it)
+                    emptyList<MediaItem>() to emptyList()
+                }
+            }
+            _state.update { st ->
+                val sdPaths = st.sdItems.mapTo(HashSet()) { it.item.path }
+                val internalPaths = st.internalItems.mapTo(HashSet()) { it.item.path }
+                val sdAppend = fetched.first.filter { it.path !in sdPaths }.map { it.toRow(cameraId) }
+                val internalAppend = fetched.second.filter { it.path !in internalPaths }.map { it.toRow(cameraId) }
+                st.copy(
+                    sdItems = st.sdItems + sdAppend,
+                    internalItems = st.internalItems + internalAppend,
+                    loadingMore = false,
+                    canLoadMore = repo.hasMore(MediaStore.SD_CARD) || repo.hasMore(MediaStore.INTERNAL),
+                )
             }
         }
     }
@@ -765,6 +881,7 @@ class MediaViewModel(
                     sdItems = pages.sd.items.map { row -> row.toRow(cameraId) },
                     internalItems = pages.internal.items.map { row -> row.toRow(cameraId) },
                     storesStatus = pages.stores ?: it.storesStatus,
+                    canLoadMore = repo.hasMore(MediaStore.SD_CARD) || repo.hasMore(MediaStore.INTERNAL),
                 )
             }
         }
@@ -773,6 +890,7 @@ class MediaViewModel(
     fun disconnect() {
         scanJob?.cancel()
         scanJob = null
+        downloads?.cancelAll()
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 stackMutex.withLock {
@@ -796,9 +914,12 @@ class MediaViewModel(
                     downloadProgress = emptyMap(),
                     thumbnails = emptyMap(),
                     fullImages = emptyMap(),
+                    shootingParams = emptyMap(),
                     processing = emptySet(),
                     scanning = false,
                     scannedDevices = emptyList(),
+                    canLoadMore = false,
+                    loadingMore = false,
                     status = "已断开。",
                 )
             }
@@ -809,9 +930,17 @@ class MediaViewModel(
         _state.update { it.copy(status = null) }
     }
 
+    fun setFilter(filter: MediaFilter) {
+        _state.update { it.copy(filter = filter) }
+    }
+
     override fun onCleared() {
-        transport?.close()
-        apJoiner?.release()
+        // Keep the datalink + AP binding alive if a background download is still running (the
+        // foreground service holds the process); otherwise release them with the screen.
+        if (downloads?.isRunning != true) {
+            transport?.close()
+            apJoiner?.release()
+        }
         super.onCleared()
     }
 
@@ -847,6 +976,7 @@ class MediaViewModelFactory(
             appContext = container.appContext,
             pairingIdentifier = container.controllerDeviceId.toString(),
             sessionController = container.realController,
+            downloads = (container.appContext as OsmoDemoApplication).downloadCoordinator,
         ) as T
     }
 }

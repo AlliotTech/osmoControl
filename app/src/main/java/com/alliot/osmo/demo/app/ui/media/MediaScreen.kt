@@ -24,6 +24,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
@@ -34,6 +35,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -46,6 +48,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -59,6 +62,7 @@ import com.alliot.osmo.demo.app.ui.home.HomeFilledButton
 import com.alliot.osmo.demo.app.ui.home.HomeHapticKind
 import com.alliot.osmo.demo.app.ui.home.HomeOutlinedButton
 import com.alliot.osmo.demo.app.ui.home.HomeSectionCard
+import com.alliot.osmo.demo.media.exif.ShootingParams
 import com.alliot.osmo.demo.protocol.duml.StoresStatusPayload
 
 /**
@@ -75,6 +79,17 @@ fun MediaScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var viewerPath by remember { mutableStateOf<String?>(null) }
+
+    // Infinite scroll: load the next older page as the grid nears its end. loadMore() self-guards on
+    // canLoadMore/loadingMore, so re-emitting while a fetch is in flight is a no-op.
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            val info = listState.layoutInfo
+            (info.visibleItemsInfo.lastOrNull()?.index ?: 0) to info.totalItemsCount
+        }.collect { (lastVisible, total) ->
+            if (total > 0 && lastVisible >= total - 2) viewModel.loadMore()
+        }
+    }
 
     LazyColumn(
         state = listState,
@@ -107,8 +122,54 @@ fun MediaScreen(
                     )
                 }
             }
-            mediaSection("SD 卡", state.sdItems, state, viewModel) { viewerPath = it }
-            mediaSection("机身内存", state.internalItems, state, viewModel) { viewerPath = it }
+            if (state.sdItems.isNotEmpty() || state.internalItems.isNotEmpty()) {
+                item(key = "filter") {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        MediaFilter.values().forEach { f ->
+                            FilterChip(
+                                selected = state.filter == f,
+                                onClick = { viewModel.setFilter(f) },
+                                label = { Text(f.label) },
+                            )
+                        }
+                        Spacer(modifier = Modifier.weight(1f))
+                        TextButton(onClick = { viewModel.downloadAll() }) { Text("下载全部") }
+                    }
+                }
+            }
+            mediaSection("SD 卡", state.sdItems.filter { state.filter.accepts(it) }, state, viewModel) { viewerPath = it }
+            mediaSection("机身内存", state.internalItems.filter { state.filter.accepts(it) }, state, viewModel) { viewerPath = it }
+            if (state.loadingMore || state.canLoadMore) {
+                item(key = "loadmore") {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (state.loadingMore) {
+                            CircularProgressIndicator(modifier = Modifier.width(18.dp), strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("正在加载更早的媒体 …", style = MaterialTheme.typography.bodySmall)
+                        } else {
+                            TextButton(onClick = { viewModel.loadMore() }) { Text("加载更早的媒体") }
+                        }
+                    }
+                }
+            } else if (state.sdItems.isNotEmpty() || state.internalItems.isNotEmpty()) {
+                item(key = "allloaded") {
+                    Text(
+                        text = "已加载全部媒体。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
         }
     }
 
@@ -121,10 +182,12 @@ fun MediaScreen(
             row = viewerRow,
             thumbnail = state.thumbnails[viewerRow.item.path],
             fullImage = state.fullImages[viewerRow.item.path],
+            shooting = state.shootingParams[viewerRow.item.path],
             playbackUrl = viewModel.playbackUrl(viewerRow),
             progress = state.downloadProgress[viewerRow.item.path],
             busy = state.processing.contains(viewerRow.item.path),
             onLoadFullImage = { viewModel.loadFullImage(viewerRow) },
+            onLoadShooting = { viewModel.loadShootingParams(viewerRow) },
             onDownload = { viewModel.download(viewerRow) },
             onCapture = { viewModel.requestFrameCapture(viewerRow) },
             onTrim = { viewModel.requestTrim(viewerRow) },
@@ -437,10 +500,12 @@ private fun MediaViewer(
     row: MediaRow,
     thumbnail: ByteArray?,
     fullImage: ByteArray?,
+    shooting: ShootingParams?,
     playbackUrl: String,
     progress: Float?,
     busy: Boolean,
     onLoadFullImage: () -> Unit,
+    onLoadShooting: () -> Unit,
     onDownload: () -> Unit,
     onCapture: () -> Unit,
     onTrim: () -> Unit,
@@ -467,6 +532,10 @@ private fun MediaViewer(
                 }
             }
 
+            if (!row.item.isVideo) {
+                LaunchedEffect(row.item.path) { onLoadShooting() }
+            }
+
             // top bar: name + close
             Row(
                 modifier = Modifier
@@ -491,6 +560,16 @@ private fun MediaViewer(
                         style = MaterialTheme.typography.labelSmall,
                         color = Color.White.copy(alpha = 0.8f),
                     )
+                    val shootingText = shooting?.let { shootingLine(it) }
+                    if (shootingText != null) {
+                        Text(
+                            text = shootingText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White.copy(alpha = 0.8f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
                 TextButton(onClick = onDismiss) { Text("关闭", color = Color.White) }
             }
