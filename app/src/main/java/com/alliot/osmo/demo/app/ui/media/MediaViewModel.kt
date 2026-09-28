@@ -120,6 +120,8 @@ class MediaViewModel(
     private var repository: MediaRepository? = null
     private var downloader: DownloadManager? = null
     private var apJoiner: CameraApJoiner? = null
+    private var wifiRejoins = 0
+    private val pendingResumePaths = mutableSetOf<String>()
 
     private val _state = MutableStateFlow(
         MediaUiState(
@@ -158,6 +160,8 @@ class MediaViewModel(
         ) {
             return
         }
+        wifiRejoins = 0
+        pendingResumePaths.clear()
         _state.update {
             it.copy(
                 connection = MediaConnectionState.CONNECTING,
@@ -283,7 +287,8 @@ class MediaViewModel(
             object : CameraApJoiner.Listener {
                 override fun onLog(s: String) {}
                 override fun onNetwork(network: Network, link: LinkProperties?) {
-                    joined.complete(Result.success(Unit))
+                    if (!joined.isCompleted) joined.complete(Result.success(Unit))
+                    else onWifiRejoined()
                 }
                 override fun onFailed(reason: String) {
                     joined.complete(Result.failure(IllegalStateException(reason)))
@@ -306,9 +311,27 @@ class MediaViewModel(
         }
     }
 
-    /** The camera AP dropped mid-session: tear the datalink down so the UI reflects reality. */
+    /**
+     * The camera AP dropped mid-session. WifiNetworkSpecifier does not reconnect on its
+     * own, so retry up to [MAX_WIFI_REJOINS] times via [CameraApJoiner.rejoin]; any
+     * in-flight downloads are remembered and resumed once the AP is back
+     * ([onWifiRejoined]). Only after the retries are exhausted is the datalink torn down.
+     */
     private fun onWifiLost() {
         viewModelScope.launch {
+            pendingResumePaths.addAll(_state.value.downloadProgress.keys)
+            val canRejoin = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                apJoiner != null && wifiRejoins < MAX_WIFI_REJOINS
+            if (canRejoin) {
+                wifiRejoins++
+                _state.update {
+                    it.copy(status = "相机 Wi-Fi 掉线，正在重连（$wifiRejoins/$MAX_WIFI_REJOINS）…")
+                }
+                if (apJoiner?.rejoin() != true) {
+                    _state.update { it.copy(status = "无法重连相机 Wi-Fi。") }
+                }
+                return@launch
+            }
             withContext(Dispatchers.IO) {
                 stackMutex.withLock {
                     transport?.close()
@@ -317,12 +340,40 @@ class MediaViewModel(
                     downloader = null
                 }
             }
+            apJoiner?.release()
+            apJoiner = null
             _state.update {
                 it.copy(
                     connection = MediaConnectionState.DISCONNECTED,
                     isLoading = false,
-                    status = "相机 Wi-Fi 已断开，请重新连接。",
+                    downloadProgress = emptyMap(),
+                    status = "相机 Wi-Fi 掉线，重连 $MAX_WIFI_REJOINS 次仍失败，请重新连接。",
                 )
+            }
+            pendingResumePaths.clear()
+        }
+    }
+
+    /**
+     * A rejoin succeeded (a second [CameraApJoiner] onNetwork): the process is rebound to
+     * the camera network, so HTTP works again. Keep the loaded grid and resume any
+     * downloads that were in flight when the AP dropped — each picks up from its `.part`.
+     */
+    private fun onWifiRejoined() {
+        viewModelScope.launch {
+            val resume = pendingResumePaths.toList()
+            pendingResumePaths.clear()
+            _state.update {
+                it.copy(
+                    status = if (resume.isEmpty()) "相机 Wi-Fi 已重连。"
+                    else "相机 Wi-Fi 已重连，正在恢复 ${resume.size} 个下载 …",
+                )
+            }
+            if (resume.isNotEmpty()) {
+                val rows = _state.value.sdItems + _state.value.internalItems
+                resume.forEach { path ->
+                    rows.firstOrNull { it.item.path == path }?.let { download(it) }
+                }
             }
         }
     }
@@ -610,6 +661,8 @@ class MediaViewModel(
                     downloader = null
                     apJoiner?.release()
                     apJoiner = null
+                    wifiRejoins = 0
+                    pendingResumePaths.clear()
                 }
             }
             _state.update {
@@ -657,6 +710,8 @@ class MediaViewModel(
         private const val WORK_DIR = "media"
         private const val KEY_WIFI_SSID = "wifi_ssid"
         private const val WIFI_JOIN_TIMEOUT_MS = 30_000L
+        /** AP rejoin attempts allowed per session before giving up (osmosis MAX_WIFI_REJOINS). */
+        private const val MAX_WIFI_REJOINS = 3
     }
 }
 
