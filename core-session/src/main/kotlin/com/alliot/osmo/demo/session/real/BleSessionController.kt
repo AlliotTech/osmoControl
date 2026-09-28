@@ -616,10 +616,28 @@ class BleSessionController(
     }
 
     override suspend fun fetchWifiCredentials(): WifiCredentials? {
-        if (!bleClient.connectionState.value.isConnected) {
-            appendLog(LogCategory.BLE, "Wi-Fi creds: no BLE link.")
+        val mac = _status.value.connectedDevice?.macAddress
+            ?: run { appendLog(LogCategory.BLE, "Wi-Fi creds: no connected camera."); return null }
+        // MEDIA INDEPENDENT (osmosis parity): an Osmo will not answer the Mimo DUML pairing/wake/Wi-Fi
+        // commands while an R-SDK controller session (the 0xAA ConnectionRequest) owns the link —
+        // observed on an Action 6 Pro, which ATT-acked every frame yet never replied. Drop the control
+        // session and reopen a clean, armed, pure-DUML link (bleClient.connect arms FFF4 and sends NO
+        // 0xAA), exactly as osmosis' media GattClient does. The workbench (control) session is left
+        // torn down; the user reconnects it from the workbench afterwards.
+        manualDisconnectRequested = true
+        reconnectJob?.cancel()
+        clearPendingCommands()
+        stopStatusWatchdog()
+        stopAutoGpsPush()
+        runCatching { bleClient.disconnect() }
+        delay(WIFI_RELINK_SETTLE_MS)
+        val relinked = runCatching { bleClient.connect(mac) }.isSuccess &&
+            bleClient.connectionState.value.isConnected
+        if (!relinked) {
+            appendLog(LogCategory.BLE, "Wi-Fi creds: clean DUML relink to $mac failed.")
             return null
         }
+        appendLog(LogCategory.BLE, "Wi-Fi creds: clean DUML link up (no R-SDK handshake).")
         val ssidWaiter = CompletableDeferred<String?>()
         val passWaiter = CompletableDeferred<String?>()
         wifiSsidDeferred = ssidWaiter
@@ -1822,6 +1840,7 @@ class BleSessionController(
         private const val WIFI_CREDENTIALS_TIMEOUT_MS = 3_000L
         private const val WIFI_QUERY_SPACING_MS = 500L
         private const val WIFI_STEP_SPACING_MS = 700L
+        private const val WIFI_RELINK_SETTLE_MS = 800L
     }
 
     private data class CommandKey(val cmdSet: Int, val cmdId: Int)
