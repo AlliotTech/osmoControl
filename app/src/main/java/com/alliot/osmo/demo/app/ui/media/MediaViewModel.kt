@@ -440,7 +440,7 @@ class MediaViewModel(
         _state.update { it.copy(frameCaptureTarget = null) }
     }
 
-    /** Decode the frame at [offsetMs] of the pending target video and save it to Pictures/Osmosis. */
+    /** Decode the frame at [offsetMs] of the pending target video and save it to Pictures/OsmoControl. */
     fun confirmFrameCapture(offsetMs: Long) {
         val row = _state.value.frameCaptureTarget ?: return
         val dl = downloader
@@ -469,7 +469,7 @@ class MediaViewModel(
             _state.update {
                 it.copy(
                     processing = it.processing - path,
-                    status = if (uri != null) "已保存抽帧到相册（Pictures/Osmosis）。"
+                    status = if (uri != null) "已保存抽帧到相册（Pictures/OsmoControl）。"
                     else "抽帧失败：该帧无法解码。",
                 )
             }
@@ -486,7 +486,7 @@ class MediaViewModel(
         _state.update { it.copy(trimTarget = null) }
     }
 
-    /** Re-mux only [startMs, endMs] of the pending target video into Movies/Osmosis. */
+    /** Re-mux only [startMs, endMs] of the pending target video into Movies/OsmoControl. */
     fun confirmTrim(startMs: Long, endMs: Long) {
         val row = _state.value.trimTarget ?: return
         val dl = downloader
@@ -520,7 +520,7 @@ class MediaViewModel(
             _state.update {
                 it.copy(
                     processing = it.processing - path,
-                    status = if (uri != null) "裁剪完成，已保存到相册（Movies/Osmosis）。"
+                    status = if (uri != null) "裁剪完成，已保存到相册（Movies/OsmoControl）。"
                     else "裁剪失败。",
                 )
             }

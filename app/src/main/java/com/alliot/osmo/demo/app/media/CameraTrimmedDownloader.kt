@@ -12,7 +12,7 @@ import java.nio.ByteBuffer
 
 /**
  * Re-muxes a time window off a full-res clip that is still **on the camera** and saves it into
- * `Movies/Osmosis`, without re-encoding.
+ * `Movies/OsmoControl`, without re-encoding.
  *
  * A keyframe-aligned stream copy with [MediaExtractor] → [MediaMuxer]: because [MediaExtractor] speaks
  * HTTP and range-requests, pointing it at the full-res `.MP4` fetches the `moov` and then only the
@@ -21,7 +21,7 @@ import java.nio.ByteBuffer
  *
  * osmoControl adaptation: instead of osmosis' `HttpClient` + `CameraFile`, the caller supplies the
  * absolute camera media URL and a display base-name directly to [trim]. The result is written to a
- * pending `Movies/Osmosis` MediaStore item, so the class is self-contained.
+ * pending `Movies/OsmoControl` MediaStore item, so the class is self-contained.
  */
 class CameraTrimmedDownloader(
     private val context: Context,
@@ -30,7 +30,7 @@ class CameraTrimmedDownloader(
     /**
      * Copy the window [trim] off the full-res video at [mediaUrl] (an absolute
      * `http://$ip/v2?storage=&path=` URL) and save it as `<baseName>_<startS>-<endS>s.mp4` into
-     * `Movies/Osmosis`. [baseName] is the display base-name of the clip (without extension). Returns the
+     * `Movies/OsmoControl`. [baseName] is the display base-name of the clip (without extension). Returns the
      * saved item's Uri, or null when the trim failed. Blocking — call off the main thread.
      */
     fun trim(mediaUrl: String, baseName: String, trim: TrimRange): Uri? {
@@ -107,7 +107,7 @@ class CameraTrimmedDownloader(
 
     // ---- MediaStore plumbing ------------------------------------------------
 
-    /** Insert a pending Movies/Osmosis video item. */
+    /** Insert a pending Movies/OsmoControl video item. */
     private fun createPending(displayName: String): Uri? {
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
@@ -126,6 +126,6 @@ class CameraTrimmedDownloader(
 
     companion object {
         /** Same folder the downloader writes videos to. */
-        private const val MOVIES_DIR = "Movies/Osmosis"
+        private const val MOVIES_DIR = "Movies/OsmoControl"
     }
 }

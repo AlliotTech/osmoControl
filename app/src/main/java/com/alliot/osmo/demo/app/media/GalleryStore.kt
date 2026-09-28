@@ -10,9 +10,9 @@ import java.io.File
 
 /**
  * Publishes a downloaded camera file into the shared MediaStore so it shows up in the phone's
- * Gallery/Photos — videos under `Movies/Osmosis`, stills under `Pictures/Osmosis` — mirroring
- * osmosis' `/Osmosis` output. The download itself streams to app-private storage first (for resume +
- * SHA-256 verification); this copies the verified result out and the caller deletes the temp file.
+ * Gallery/Photos — videos under `Movies/OsmoControl`, stills under `Pictures/OsmoControl`. The
+ * download itself streams to app-private storage first (for resume + SHA-256 verification); this
+ * copies the verified result out and the caller deletes the temp file.
  *
  * Scoped-storage (API 29+) only; on API 28 the caller keeps the app-private copy.
  */
@@ -31,7 +31,7 @@ object GalleryStore {
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
             put(MediaStore.MediaColumns.MIME_TYPE, if (isVideo) "video/mp4" else "image/jpeg")
-            put(MediaStore.MediaColumns.RELATIVE_PATH, if (isVideo) "Movies/Osmosis" else "Pictures/Osmosis")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, if (isVideo) "Movies/OsmoControl" else "Pictures/OsmoControl")
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
         val uri = runCatching { resolver.insert(collection, values) }.getOrNull() ?: return null

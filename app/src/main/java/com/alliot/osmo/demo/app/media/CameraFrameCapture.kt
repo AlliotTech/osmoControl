@@ -20,7 +20,7 @@ import java.io.ByteArrayOutputStream
 
 /**
  * Pulls one full-resolution frame out of a clip that is still **on the camera** and saves it as a JPEG
- * next to the photos (`Pictures/Osmosis`). Nothing else of the clip is downloaded.
+ * next to the photos (`Pictures/OsmoControl`). Nothing else of the clip is downloaded.
  *
  * Same trick as the trimmed download: [MediaExtractor] speaks HTTP and range-requests, so pointed at
  * the full-res `.MP4` it fetches the `moov` and then only the samples it is asked for. We seek to the
@@ -250,7 +250,7 @@ class CameraFrameCapture(
 
     // ---- save -----------------------------------------------------------------
 
-    /** Write [jpeg] into Pictures/Osmosis as a pending item, then publish it. */
+    /** Write [jpeg] into Pictures/OsmoControl as a pending item, then publish it. */
     private fun save(jpeg: ByteArray, displayName: String): Uri? {
         val resolver = context.contentResolver
         val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
@@ -271,7 +271,7 @@ class CameraFrameCapture(
 
     companion object {
         /** Same folder the downloader writes photos to. */
-        private const val PICTURES_DIR = "Pictures/Osmosis"
+        private const val PICTURES_DIR = "Pictures/OsmoControl"
         private const val JPEG_QUALITY = 95
         /** Keep feeding samples this far past the target before EOS, for reordered frames. */
         private const val FEED_PAST_TARGET_US = 500_000L
