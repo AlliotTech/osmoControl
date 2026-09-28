@@ -78,6 +78,8 @@ data class MediaUiState(
      * available". A missing key means "not yet requested".
      */
     val thumbnails: Map<String, ByteArray?> = emptyMap(),
+    /** path -> full-resolution still JPEG bytes for the viewer; null = fetching, missing = not requested. */
+    val fullImages: Map<String, ByteArray?> = emptyMap(),
     val deleteCandidate: MediaRow? = null,
 )
 
@@ -565,6 +567,34 @@ class MediaViewModel(
         return null
     }
 
+    /**
+     * HTTP URL to stream [row] straight off the camera - full-res video for the player, or the
+     * full still. Uses the record's own store; playback falls back to nothing if that mount 404s.
+     */
+    fun playbackUrl(row: MediaRow): String =
+        "http://$cameraIp/v2?storage=${row.item.store.index}&path=${row.item.path}"
+
+    /** Lazily fetch a still's full-resolution JPEG for the viewer. No-op for videos. Idempotent. */
+    fun loadFullImage(row: MediaRow) {
+        val item = row.item
+        if (item.isVideo) return
+        val path = item.path
+        if (_state.value.fullImages.containsKey(path)) return
+        val ip = cameraIp
+        _state.update { it.copy(fullImages = it.fullImages + (path to null)) }
+        viewModelScope.launch {
+            val bytes = withContext(Dispatchers.IO) {
+                runCatching {
+                    val storage = downloader?.probe(item)?.first ?: item.store.index
+                    httpGetCapped(ip, "/v2?storage=$storage&path=${item.path}", Long.MAX_VALUE)
+                }.getOrNull()
+            }?.takeIf { it.isNotEmpty() }
+            if (bytes != null) {
+                _state.update { it.copy(fullImages = it.fullImages + (path to bytes)) }
+            }
+        }
+    }
+
     /** GET at most [maxBytes] of a camera path (Range-capped), or null on any error. */
     private fun httpGetCapped(ip: String, path: String, maxBytes: Long): ByteArray? {
         val conn = (URL("http://$ip$path").openConnection() as HttpURLConnection).apply {
@@ -694,6 +724,7 @@ class MediaViewModel(
                     internalItems = emptyList(),
                     downloadProgress = emptyMap(),
                     thumbnails = emptyMap(),
+                    fullImages = emptyMap(),
                     processing = emptySet(),
                     status = "已断开。",
                 )

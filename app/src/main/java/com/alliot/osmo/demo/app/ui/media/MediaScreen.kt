@@ -14,7 +14,9 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
@@ -30,6 +32,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,20 +44,27 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.media3.common.MediaItem as ExoMediaItem
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import com.alliot.osmo.demo.app.ui.home.HomeFilledButton
 import com.alliot.osmo.demo.app.ui.home.HomeHapticKind
 import com.alliot.osmo.demo.app.ui.home.HomeOutlinedButton
 import com.alliot.osmo.demo.app.ui.home.HomeSectionCard
 
 /**
- * Media offload as an album/gallery: a thumbnail grid grouped by store, with a per-item detail
- * dialog carrying the download / frame-capture / trim / delete actions. Connection is self-contained
- * (scan + pure-DUML), so the top card only exposes connect / reload / disconnect.
+ * Media offload as an album/gallery: a thumbnail grid grouped by store, opening a full-screen
+ * viewer (in-place video player / photo preview) that carries the download / frame-capture / trim /
+ * delete actions. Connection is self-contained (scan + pure-DUML); once connected the connect card
+ * collapses to a slim status bar so the grid gets the screen.
  */
 @Composable
 fun MediaScreen(
@@ -63,7 +73,7 @@ fun MediaScreen(
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    var detailPath by remember { mutableStateOf<String?>(null) }
+    var viewerPath by remember { mutableStateOf<String?>(null) }
 
     LazyColumn(
         state = listState,
@@ -71,44 +81,10 @@ fun MediaScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item(key = "connect") {
-            HomeSectionCard(title = "相机连接") {
-                Text(
-                    text = "点“连接并加载”会自动扫描并连接相机、读取相机 Wi-Fi 并入网、载入相册，" +
-                        "全程独立于工作台，无需先连蓝牙、也无需填写任何信息。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    HomeFilledButton(
-                        onClick = viewModel::connectAndLoad,
-                        enabled = state.connection != MediaConnectionState.CONNECTING && !state.isLoading,
-                        kind = HomeHapticKind.PRIMARY,
-                    ) {
-                        Text(if (state.connection == MediaConnectionState.CONNECTED) "重新加载" else "连接并加载")
-                    }
-                    HomeOutlinedButton(
-                        onClick = viewModel::disconnect,
-                        enabled = state.connection == MediaConnectionState.CONNECTED ||
-                            state.connection == MediaConnectionState.FAILED,
-                        kind = HomeHapticKind.SECONDARY,
-                    ) {
-                        Text("断开")
-                    }
-                }
-                val status = state.connectionError ?: state.status
-                if (status != null) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = status,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (state.connection == MediaConnectionState.FAILED) {
-                            MaterialTheme.colorScheme.error
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                    )
-                }
+            if (state.connection == MediaConnectionState.CONNECTED) {
+                ConnectedBar(state = state, viewModel = viewModel)
+            } else {
+                ConnectCard(state = state, viewModel = viewModel)
             }
         }
 
@@ -121,7 +97,7 @@ fun MediaScreen(
         }
 
         if (state.connection == MediaConnectionState.CONNECTED) {
-            if (state.sdItems.isEmpty() && state.internalItems.isEmpty()) {
+            if (state.sdItems.isEmpty() && state.internalItems.isEmpty() && !state.isLoading) {
                 item(key = "empty") {
                     Text(
                         text = "没有读到媒体条目。",
@@ -130,30 +106,33 @@ fun MediaScreen(
                     )
                 }
             }
-            mediaSection("SD 卡", state.sdItems, state, viewModel) { detailPath = it }
-            mediaSection("机身内存", state.internalItems, state, viewModel) { detailPath = it }
+            mediaSection("SD 卡", state.sdItems, state, viewModel) { viewerPath = it }
+            mediaSection("机身内存", state.internalItems, state, viewModel) { viewerPath = it }
         }
     }
 
-    // ---- per-item detail (album entry actions) ----
-    val detailRow = detailPath?.let { p ->
+    // ---- full-screen viewer (in-place player / photo) ----
+    val viewerRow = viewerPath?.let { p ->
         (state.sdItems + state.internalItems).firstOrNull { it.item.path == p }
     }
-    if (detailRow != null) {
-        MediaDetailDialog(
-            row = detailRow,
-            thumbnail = state.thumbnails[detailRow.item.path],
-            progress = state.downloadProgress[detailRow.item.path],
-            busy = state.processing.contains(detailRow.item.path),
-            onDownload = { viewModel.download(detailRow) },
-            onCapture = { viewModel.requestFrameCapture(detailRow); detailPath = null },
-            onTrim = { viewModel.requestTrim(detailRow); detailPath = null },
-            onDelete = { viewModel.requestDelete(detailRow) },
-            onDismiss = { detailPath = null },
+    if (viewerRow != null) {
+        MediaViewer(
+            row = viewerRow,
+            thumbnail = state.thumbnails[viewerRow.item.path],
+            fullImage = state.fullImages[viewerRow.item.path],
+            playbackUrl = viewModel.playbackUrl(viewerRow),
+            progress = state.downloadProgress[viewerRow.item.path],
+            busy = state.processing.contains(viewerRow.item.path),
+            onLoadFullImage = { viewModel.loadFullImage(viewerRow) },
+            onDownload = { viewModel.download(viewerRow) },
+            onCapture = { viewModel.requestFrameCapture(viewerRow) },
+            onTrim = { viewModel.requestTrim(viewerRow) },
+            onDelete = { viewModel.requestDelete(viewerRow) },
+            onDismiss = { viewerPath = null },
         )
-    } else if (detailPath != null) {
-        // The item vanished (e.g. deleted) — close the stale sheet.
-        detailPath = null
+    } else if (viewerPath != null) {
+        // The item vanished (e.g. deleted) — close the stale viewer.
+        viewerPath = null
     }
 
     val candidate = state.deleteCandidate
@@ -191,6 +170,77 @@ fun MediaScreen(
             onConfirm = { s, e -> viewModel.confirmTrim(s * 1000L, e * 1000L) },
             onDismiss = viewModel::cancelTrim,
         )
+    }
+}
+
+/** Full connect card, shown while not connected. */
+@Composable
+private fun ConnectCard(state: MediaUiState, viewModel: MediaViewModel) {
+    HomeSectionCard(title = "相机连接") {
+        Text(
+            text = "点“连接并加载”会自动扫描并连接相机、读取相机 Wi-Fi 并入网、载入相册，" +
+                "全程独立于工作台，无需先连蓝牙、也无需填写任何信息。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        HomeFilledButton(
+            onClick = viewModel::connectAndLoad,
+            enabled = state.connection != MediaConnectionState.CONNECTING && !state.isLoading,
+            kind = HomeHapticKind.PRIMARY,
+        ) {
+            Text(if (state.connection == MediaConnectionState.CONNECTING) "连接中…" else "连接并加载")
+        }
+        val status = state.connectionError ?: state.status
+        if (status != null) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = status,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (state.connection == MediaConnectionState.FAILED) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+        }
+    }
+}
+
+/** Slim one-line bar shown once connected, freeing the screen for the grid. */
+@Composable
+private fun ConnectedBar(state: MediaUiState, viewModel: MediaViewModel) {
+    val total = state.sdItems.size + state.internalItems.size
+    Card(
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "已连接相机 · $total 个媒体",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                val status = state.status
+                if (status != null) {
+                    Text(
+                        text = status,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            TextButton(onClick = viewModel::connectAndLoad, enabled = !state.isLoading) { Text("重新加载") }
+            TextButton(onClick = viewModel::disconnect) { Text("断开") }
+        }
     }
 }
 
@@ -301,74 +351,96 @@ private fun MediaTile(
     }
 }
 
+/**
+ * Full-screen viewer: streams the clip in an in-place ExoPlayer, or shows the full-resolution
+ * still, with the album actions pinned to the bottom.
+ */
 @Composable
-private fun MediaDetailDialog(
+private fun MediaViewer(
     row: MediaRow,
     thumbnail: ByteArray?,
+    fullImage: ByteArray?,
+    playbackUrl: String,
     progress: Float?,
     busy: Boolean,
+    onLoadFullImage: () -> Unit,
     onDownload: () -> Unit,
     onCapture: () -> Unit,
     onTrim: () -> Unit,
     onDelete: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val bmp = remember(thumbnail) {
-        thumbnail?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
-    }
-    Dialog(onDismissRequest = onDismiss) {
-        Card(
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black),
         ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(16f / 9f)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    if (bmp != null) {
-                        Image(
-                            bitmap = bmp,
-                            contentDescription = row.item.name,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    } else {
-                        Text(
-                            text = if (row.item.isVideo) "视频" else "照片",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (row.item.isVideo) {
+                    VideoPlayer(url = playbackUrl, modifier = Modifier.fillMaxWidth())
+                } else {
+                    PhotoView(fullImage = fullImage, thumbnail = thumbnail, onLoadFullImage = onLoadFullImage)
                 }
-                Spacer(modifier = Modifier.height(10.dp))
-                Text(
-                    text = row.item.name,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = mediaMetaLine(row),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                if (progress != null) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+            }
+
+            // top bar: name + close
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .background(Color.Black.copy(alpha = 0.45f))
+                    .statusBarsPadding()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "${(progress * 100).toInt()}%",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        text = row.item.name,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = mediaMetaLine(row),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White.copy(alpha = 0.8f),
                     )
                 }
-                Spacer(modifier = Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onDismiss) { Text("关闭", color = Color.White) }
+            }
+
+            // bottom action bar
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(Color.Black.copy(alpha = 0.45f))
+                    .navigationBarsPadding()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                if (progress != null) {
+                    LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                    Text(
+                        text = "下载中 ${(progress * 100).toInt()}%",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White,
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     HomeFilledButton(
                         onClick = onDownload,
                         enabled = progress == null && !busy,
@@ -384,30 +456,75 @@ private fun MediaDetailDialog(
                             Text("裁剪")
                         }
                     }
-                }
-                Spacer(modifier = Modifier.height(4.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
+                    Spacer(modifier = Modifier.weight(1f))
                     if (row.canDelete) {
                         TextButton(onClick = onDelete) {
-                            Text("从相机删除", color = MaterialTheme.colorScheme.error)
+                            Text("删除", color = MaterialTheme.colorScheme.error)
                         }
-                    } else {
-                        Spacer(modifier = Modifier.width(1.dp))
                     }
-                    TextButton(onClick = onDismiss) { Text("关闭") }
                 }
                 if (!row.canDelete) {
                     Text(
                         text = if (row.downloaded) "该文件无可删除句柄，或已删除。" else "先下载并校验后才能从相机删除。",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = Color.White.copy(alpha = 0.7f),
                     )
                 }
             }
         }
+    }
+}
+
+/** In-place video player streaming straight off the camera over HTTP (range requests). */
+@Composable
+private fun VideoPlayer(url: String, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val player = remember(url) {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(ExoMediaItem.fromUri(url))
+            prepare()
+            playWhenReady = true
+        }
+    }
+    DisposableEffect(url) {
+        onDispose { player.release() }
+    }
+    AndroidView(
+        factory = { ctx ->
+            PlayerView(ctx).apply {
+                this.player = player
+                useController = true
+                setShowNextButton(false)
+                setShowPreviousButton(false)
+            }
+        },
+        modifier = modifier
+            .fillMaxWidth()
+            .aspectRatio(16f / 9f),
+    )
+}
+
+/** Full-resolution still, falling back to the thumbnail until the full image arrives. */
+@Composable
+private fun PhotoView(
+    fullImage: ByteArray?,
+    thumbnail: ByteArray?,
+    onLoadFullImage: () -> Unit,
+) {
+    LaunchedEffect(Unit) { onLoadFullImage() }
+    val shown = fullImage ?: thumbnail
+    val bmp = remember(shown) {
+        shown?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
+    }
+    if (bmp != null) {
+        Image(
+            bitmap = bmp,
+            contentDescription = null,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxSize(),
+        )
+    } else {
+        CircularProgressIndicator(color = Color.White)
     }
 }
 
