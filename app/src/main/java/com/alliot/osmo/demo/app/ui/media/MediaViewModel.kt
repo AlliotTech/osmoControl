@@ -294,55 +294,19 @@ class MediaViewModel(
     }
 
     /**
-     * Ensures a live BLE/DUML session to the camera so [joinWifiIfNeeded] can read its Wi-Fi
-     * credentials - reusing a live workbench link, otherwise connecting the user-[chosen] camera
-     * (picked from the scan list) and waking it, all from this screen (no workbench trip).
-     */
-    private suspend fun ensureCameraSession(chosen: SessionDevice?) {
-        val controller = sessionController
-            ?: throw IllegalStateException("当前为模拟模式，媒体功能需要真实相机。")
-        val now = controller.status.value
-        if (now.protocolReady && !now.sleeping) return
-        if (now.protocolReady && now.sleeping) {
-            _state.update { it.copy(status = "相机休眠中，正在唤醒 …") }
-            controller.wake()
-            awaitReadyAwake(controller, "唤醒相机超时，请重试。")
-            return
-        }
-        val device = chosen ?: throw IllegalStateException("请先选择要连接的相机。")
-        _state.update { it.copy(status = "正在连接「${device.name}」蓝牙 …") }
-        controller.connect(device)
-        awaitReadyAwake(controller, "相机连接超时，请重试或在工作台确认配对。")
-    }
-
-    /** Waits until the session is protocol-ready and awake, waking once if it comes up sleeping. */
-    private suspend fun awaitReadyAwake(controller: SessionController, timeoutMessage: String) {
-        val ready = withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
-            controller.status.first { it.protocolReady }
-            true
-        } ?: false
-        if (!ready) throw IllegalStateException(timeoutMessage)
-        if (controller.status.value.sleeping) {
-            controller.wake()
-            val awake = withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
-                controller.status.first { it.protocolReady && !it.sleeping }
-                true
-            } ?: false
-            if (!awake) throw IllegalStateException("相机已连接但唤醒失败，请重试。")
-        }
-    }
-
-    /**
-     * Brings up the camera's Wi-Fi and binds the process without leaving this screen:
-     * ensures a BLE/DUML link exists ([ensureCameraSession] — scans + connects + wakes on its
-     * own if the workbench hasn't), reads the camera's own AP credentials over that link
-     * ([SessionController.fetchWifiCredentials] — 0x07/0x07 SSID, 0x07/0x0e password), then joins
-     * that AP and binds the process ([CameraApJoiner]) before any socket opens. No manual entry;
-     * throws with a user-facing message when a step fails, surfaced on the caller's failure path.
+     * Reads the camera's Wi-Fi AP credentials over a clean, pure-DUML BLE link and joins that AP,
+     * binding the process — without leaving this screen and **without ever pairing as an R-SDK
+     * remote controller**. [SessionController.fetchWifiCredentials] opens the link to the
+     * user-[chosen] camera (or the nearest supported Osmo when none was picked) and never sends the
+     * 0xAA ConnectionRequest: an Osmo withholds its Wi-Fi credentials while an R-SDK controller
+     * session owns the link (observed on an Action 6 Pro — it ATT-acks every frame yet answers
+     * nothing). Throws with a user-facing message when a step fails, surfaced on the caller's path.
      */
     private suspend fun joinWifiIfNeeded(chosen: SessionDevice?) {
-        ensureCameraSession(chosen)
-        val creds = runCatching { sessionController?.fetchWifiCredentials() }
+        val controller = sessionController
+            ?: throw IllegalStateException("当前为模拟模式，媒体功能需要真实相机。")
+        _state.update { it.copy(status = "正在通过蓝牙读取相机 Wi-Fi 凭据 …") }
+        val creds = runCatching { controller.fetchWifiCredentials(chosen?.macAddress) }
             .onFailure { Log.w(LOG_TAG, "fetchWifiCredentials threw", it) }
             .getOrNull()
             ?: throw IllegalStateException(
@@ -868,8 +832,6 @@ class MediaViewModel(
         private const val HISTORY_DIR = "media-history"
         private const val WORK_DIR = "media"
         private const val WIFI_JOIN_TIMEOUT_MS = 30_000L
-        /** How long to wait for the BLE handshake to reach protocol-ready. */
-        private const val CONNECT_TIMEOUT_MS = 25_000L
         /** AP rejoin attempts allowed per session before giving up (osmosis MAX_WIFI_REJOINS). */
         private const val MAX_WIFI_REJOINS = 3
         private const val LOG_TAG = "OsmoMedia"

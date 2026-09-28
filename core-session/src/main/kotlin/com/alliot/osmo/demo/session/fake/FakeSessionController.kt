@@ -304,7 +304,7 @@ class FakeSessionController : SessionController {
         appendLog(LogCategory.TX, "Manual command sent.", hex)
     }
 
-    override suspend fun fetchWifiCredentials(): com.alliot.osmo.demo.session.model.WifiCredentials? {
+    override suspend fun fetchWifiCredentials(preferredMac: String?): com.alliot.osmo.demo.session.model.WifiCredentials? {
         // The fake device has no real AP; the media flow falls back to manual entry.
         appendLog(LogCategory.STATE, "Fake controller has no Wi-Fi credentials.")
         return null

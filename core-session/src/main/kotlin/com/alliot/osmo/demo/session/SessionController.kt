@@ -35,11 +35,14 @@ interface SessionController {
     suspend fun reportSnapshotKeyClick()
     suspend fun sendManualCommand(hex: String)
     /**
-     * Reads the connected camera's own AP SSID + passphrase over the open BLE link
-     * (0x07/0x07, 0x07/0x0e), so the media flow can auto-join without manual entry.
-     * Null when not connected/awake or the camera withholds them.
+     * Opens a clean, pure-DUML BLE link (never the 0xAA R-SDK ConnectionRequest) to
+     * [preferredMac] — or the nearest supported camera when null — and reads that camera's own AP
+     * SSID + passphrase (0x07/0x07, 0x07/0x0e), so the media flow can auto-join without manual
+     * entry. Null when no camera is reachable or the camera withholds them. Never pairs as an
+     * R-SDK remote controller: an Osmo withholds Wi-Fi credentials while a controller session owns
+     * the link.
      */
-    suspend fun fetchWifiCredentials(): WifiCredentials?
+    suspend fun fetchWifiCredentials(preferredMac: String? = null): WifiCredentials?
 
     /**
      * Stops the media keepalive and drops the media BLE link. Called when the media flow

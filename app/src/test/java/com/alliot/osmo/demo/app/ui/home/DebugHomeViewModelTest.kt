@@ -582,7 +582,7 @@ class DebugHomeViewModelTest {
             recordedCalls += "disconnect"
         }
 
-        override suspend fun fetchWifiCredentials(): com.alliot.osmo.demo.session.model.WifiCredentials? {
+        override suspend fun fetchWifiCredentials(preferredMac: String?): com.alliot.osmo.demo.session.model.WifiCredentials? {
             recordedCalls += "fetchWifiCredentials"
             return null
         }

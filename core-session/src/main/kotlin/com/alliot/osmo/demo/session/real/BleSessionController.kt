@@ -617,8 +617,8 @@ class BleSessionController(
         return dumlMessageId
     }
 
-    override suspend fun fetchWifiCredentials(): WifiCredentials? {
-        val mac = (_status.value.connectedDevice?.macAddress ?: scanForCameraMac())
+    override suspend fun fetchWifiCredentials(preferredMac: String?): WifiCredentials? {
+        val mac = (preferredMac ?: _status.value.connectedDevice?.macAddress ?: scanForCameraMac())
             ?: run { appendLog(LogCategory.BLE, "Wi-Fi creds: no camera found to connect."); return null }
         // MEDIA INDEPENDENT (osmosis parity): an Osmo will not answer the Mimo DUML pairing/wake/Wi-Fi
         // commands while an R-SDK controller session (the 0xAA ConnectionRequest) owns the link —
