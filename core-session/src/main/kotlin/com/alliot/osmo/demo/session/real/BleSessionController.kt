@@ -1763,8 +1763,17 @@ class BleSessionController(
         private const val GATT_WAKE_BACKOFF_BASE_MS = 500L
         private const val GATT_WAKE_PENDING_RESULT = "GATT wake sent; waiting for camera reply"
 
+        /**
+         * Pairing identifier presented in 0x07/0x45. Uses the known-good identity
+         * from osmosis (what moblin/dji-remote use; "accepted by every Osmo
+         * camera") instead of a device-derived string the camera has never seen.
+         * A sleeping camera ignores pairing requests from unknown identities
+         * (it cannot prompt for approval while asleep).
+         */
+        private const val KNOWN_PAIRING_IDENTIFIER = "284ae5b8d76b3375a04a6417ad71bea3"
+
         private fun defaultPairingIdentifier(deviceId: Long): String =
-            deviceId.toString(16).padStart(8, '0').repeat(4)
+            KNOWN_PAIRING_IDENTIFIER
         private const val KEY_REPORT_MODE_EVENT = 0x01
         private const val KEY_REPORT_VALUE_SINGLE_CLICK = 0x00
         private const val KEY_CODE_RECORD = 0x01
