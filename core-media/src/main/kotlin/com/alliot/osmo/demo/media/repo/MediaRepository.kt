@@ -5,8 +5,11 @@ import com.alliot.osmo.demo.media.datalink.DatalinkTransport
 import com.alliot.osmo.demo.media.model.MediaItem
 import com.alliot.osmo.demo.media.model.MediaStore
 import com.alliot.osmo.demo.protocol.duml.DumlCmdSet
+import com.alliot.osmo.demo.protocol.duml.DumlFileSystemCmd
 import com.alliot.osmo.demo.protocol.duml.DumlGeneralCmd
+import com.alliot.osmo.demo.protocol.duml.DumlPayloadCodec
 import com.alliot.osmo.demo.protocol.duml.MediaListCodec
+import com.alliot.osmo.demo.protocol.duml.StoresStatusPayload
 
 /**
  * Media listing and deletion over an open [DatalinkTransport].
@@ -151,9 +154,41 @@ class MediaRepository(
         return null
     }
 
+    /**
+     * Latches the camera's per-store capacity from the unprompted
+     * `0x02/0xDC` push (SD + built-in total/free, MiB). The camera emits
+     * it spontaneously once the datalink is up, so we just drain for one
+     * and ACK to keep the stream flowing. Null when none arrives within
+     * [timeoutMs] — some bodies (e.g. the Nano) never send it.
+     */
+    fun readStoresStatus(timeoutMs: Long = STORES_STATUS_TIMEOUT_MS): StoresStatusPayload? {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            for (datagram in transport.recvAll(200)) {
+                val frame = DatalinkTransport.findReplyFrame(
+                    datagram,
+                    DumlCmdSet.FILE_SYSTEM,
+                    DumlFileSystemCmd.STORES_STATUS,
+                ) ?: continue
+                val decoded = runCatching {
+                    DumlPayloadCodec.decode(frame.cmdSet, frame.cmdId, frame.flags, frame.payload)
+                }.getOrNull()
+                if (decoded is StoresStatusPayload) {
+                    log("media: stores status sd=${decoded.sdFreeMb}/${decoded.sdTotalMb}MB " +
+                        "internal=${decoded.internalFreeMb}/${decoded.internalTotalMb}MB")
+                    return decoded
+                }
+            }
+            transport.sendAck()
+        }
+        log("media: no 0x02/0xdc stores status within ${timeoutMs}ms")
+        return null
+    }
+
     companion object {
         private const val PAGE_TIMEOUT_MS = 20_000L
         private const val QUIET_CLOSE_MS = 3_000L
         private const val DELETE_TIMEOUT_MS = 10_000L
+        private const val STORES_STATUS_TIMEOUT_MS = 1_500L
     }
 }

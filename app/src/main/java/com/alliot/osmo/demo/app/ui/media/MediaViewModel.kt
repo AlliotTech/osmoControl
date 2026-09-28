@@ -23,6 +23,7 @@ import com.alliot.osmo.demo.media.model.MediaItem
 import com.alliot.osmo.demo.media.exif.EmbeddedJpeg
 import com.alliot.osmo.demo.media.model.MediaStore
 import com.alliot.osmo.demo.media.repo.MediaRepository
+import com.alliot.osmo.demo.protocol.duml.StoresStatusPayload
 import com.alliot.osmo.demo.session.SessionController
 import com.alliot.osmo.demo.session.model.SessionDevice
 import kotlinx.coroutines.Dispatchers
@@ -88,12 +89,15 @@ data class MediaUiState(
     val scanning: Boolean = false,
     /** Cameras discovered in the current scan, for the user to pick from. */
     val scannedDevices: List<SessionDevice> = emptyList(),
+    /** Per-store capacity from the camera's 0x02/0xDC push; null = not reported. */
+    val storesStatus: StoresStatusPayload? = null,
 )
 
 /** One page per store from [MediaRepository.listNewest]. */
 private data class LoadedPages(
     val sd: MediaRepository.MediaPage,
     val internal: MediaRepository.MediaPage,
+    val stores: StoresStatusPayload?,
 )
 
 /**
@@ -232,6 +236,7 @@ class MediaViewModel(
                             LoadedPages(
                                 sd = repo.listNewest(MediaStore.SD_CARD),
                                 internal = repo.listNewest(MediaStore.INTERNAL),
+                                stores = repo.readStoresStatus(),
                             ),
                         )
                     }
@@ -260,6 +265,7 @@ class MediaViewModel(
                             isLoading = false,
                             sdItems = sdRows,
                             internalItems = internalRows,
+                            storesStatus = pages.stores,
                             status = hint
                                 ?: "已加载：SD 卡 ${sdRows.size} 项，机身内存 ${internalRows.size} 项。",
                         )
@@ -785,6 +791,7 @@ class MediaViewModel(
                     LoadedPages(
                         sd = repo.listNewest(MediaStore.SD_CARD),
                         internal = repo.listNewest(MediaStore.INTERNAL),
+                        stores = repo.readStoresStatus(),
                     )
                 }.getOrNull()
             } ?: return@launch
@@ -793,6 +800,7 @@ class MediaViewModel(
                 it.copy(
                     sdItems = pages.sd.items.map { row -> row.toRow(cameraId) },
                     internalItems = pages.internal.items.map { row -> row.toRow(cameraId) },
+                    storesStatus = pages.stores ?: it.storesStatus,
                 )
             }
         }

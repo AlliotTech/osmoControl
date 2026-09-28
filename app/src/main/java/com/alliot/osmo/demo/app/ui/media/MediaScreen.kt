@@ -59,6 +59,7 @@ import com.alliot.osmo.demo.app.ui.home.HomeFilledButton
 import com.alliot.osmo.demo.app.ui.home.HomeHapticKind
 import com.alliot.osmo.demo.app.ui.home.HomeOutlinedButton
 import com.alliot.osmo.demo.app.ui.home.HomeSectionCard
+import com.alliot.osmo.demo.protocol.duml.StoresStatusPayload
 
 /**
  * Media offload as an album/gallery: a thumbnail grid grouped by store, opening a full-screen
@@ -286,11 +287,38 @@ private fun ConnectedBar(state: MediaUiState, viewModel: MediaViewModel) {
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
+                state.storesStatus?.let { stores ->
+                    val summary = storageSummary(stores)
+                    if (summary != null) {
+                        Text(
+                            text = summary,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
             }
             TextButton(onClick = viewModel::connectAndLoad, enabled = !state.isLoading) { Text("重新加载") }
             TextButton(onClick = viewModel::disconnect) { Text("断开") }
         }
     }
+}
+
+/**
+ * "SD 107.2/118.9 GB · 内置 8.1/7.9 GB" (free/total) from the camera's
+ * 0x02/0xDC push. Skips a store whose total is 0 (absent card / no
+ * built-in). Null when neither store reports a capacity.
+ */
+private fun storageSummary(s: StoresStatusPayload): String? {
+    fun gb(mb: Long) = "%.1f".format(mb / 1024f)
+    val parts = buildList {
+        if (s.sdTotalMb > 0) add("SD ${gb(s.sdFreeMb)}/${gb(s.sdTotalMb)} GB")
+        val inTotal = s.internalTotalMb ?: 0L
+        if (inTotal > 0) add("内置 ${gb(s.internalFreeMb ?: 0L)}/${gb(inTotal)} GB")
+    }
+    return parts.takeIf { it.isNotEmpty() }?.joinToString(" · ")?.let { "剩余 $it" }
 }
 
 private fun LazyListScope.mediaSection(
