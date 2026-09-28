@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The DJI Osmo camera only serves its media over plain HTTP at its AP gateway
+  (http://192.168.2.1/v2?...). Android blocks cleartext by default on targetSdk 28+,
+  so scope an exception to just the camera gateway rather than enabling cleartext app-wide.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">192.168.2.1</domain>
+    </domain-config>
+</network-security-config>
