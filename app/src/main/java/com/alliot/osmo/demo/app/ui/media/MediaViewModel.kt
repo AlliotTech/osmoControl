@@ -30,6 +30,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -232,18 +233,68 @@ class MediaViewModel(
     }
 
     /**
-     * Read the camera's own AP credentials over the paired BLE link
-     * ([SessionController.fetchWifiCredentials] — 0x07/0x07 SSID, 0x07/0x0e password),
-     * then join that AP and bind the process ([CameraApJoiner]) before any socket opens.
-     * No manual entry; throws with a user-facing message when the camera isn't reachable
-     * over BLE or withholds the credentials, so the caller's failure path surfaces it.
+     * Ensures a live BLE/DUML session to the camera so [joinWifiIfNeeded] can read its Wi-Fi
+     * credentials - reusing the workbench link when it's already up, otherwise scanning,
+     * connecting to the nearest camera and waking it, all from this screen (no workbench trip).
+     */
+    private suspend fun ensureCameraSession() {
+        val controller = sessionController
+            ?: throw IllegalStateException("当前为模拟模式，媒体功能需要真实相机。")
+        val now = controller.status.value
+        if (now.protocolReady && !now.sleeping) return
+        if (now.protocolReady && now.sleeping) {
+            _state.update { it.copy(status = "相机休眠中，正在唤醒 …") }
+            controller.wake()
+            awaitReadyAwake(controller, "唤醒相机超时，请重试。")
+            return
+        }
+        _state.update { it.copy(status = "正在扫描相机蓝牙 …") }
+        controller.startScan()
+        try {
+            val device = withTimeoutOrNull(SCAN_TIMEOUT_MS) {
+                controller.devices.first { list -> list.any { it.workbenchSupported } }
+                    .first { it.workbenchSupported }
+            } ?: throw IllegalStateException("未扫描到相机，请确认相机已开机、蓝牙已开启并在附近。")
+            _state.update { it.copy(status = "正在连接「${device.name}」蓝牙 …") }
+            controller.connect(device)
+            awaitReadyAwake(controller, "相机连接超时，请重试或在工作台确认配对。")
+        } finally {
+            runCatching { controller.stopScan() }
+        }
+    }
+
+    /** Waits until the session is protocol-ready and awake, waking once if it comes up sleeping. */
+    private suspend fun awaitReadyAwake(controller: SessionController, timeoutMessage: String) {
+        val ready = withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
+            controller.status.first { it.protocolReady }
+            true
+        } ?: false
+        if (!ready) throw IllegalStateException(timeoutMessage)
+        if (controller.status.value.sleeping) {
+            controller.wake()
+            val awake = withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
+                controller.status.first { it.protocolReady && !it.sleeping }
+                true
+            } ?: false
+            if (!awake) throw IllegalStateException("相机已连接但唤醒失败，请重试。")
+        }
+    }
+
+    /**
+     * Brings up the camera's Wi-Fi and binds the process without leaving this screen:
+     * ensures a BLE/DUML link exists ([ensureCameraSession] — scans + connects + wakes on its
+     * own if the workbench hasn't), reads the camera's own AP credentials over that link
+     * ([SessionController.fetchWifiCredentials] — 0x07/0x07 SSID, 0x07/0x0e password), then joins
+     * that AP and binds the process ([CameraApJoiner]) before any socket opens. No manual entry;
+     * throws with a user-facing message when a step fails, surfaced on the caller's failure path.
      */
     private suspend fun joinWifiIfNeeded() {
+        ensureCameraSession()
         val creds = runCatching { sessionController?.fetchWifiCredentials() }
             .onFailure { Log.w(LOG_TAG, "fetchWifiCredentials threw", it) }
             .getOrNull()
             ?: throw IllegalStateException(
-                "无法从相机获取 Wi-Fi 凭据，请确认已在“工作台”通过蓝牙连上相机。",
+                "已连上相机蓝牙，但没能读到 Wi-Fi 凭据，请重试或稍后再试。",
             )
         Log.d(LOG_TAG, "joinWifi: creds ssid='${creds.ssid}' wpa3=${creds.wpa3}")
         val ssid = creds.ssid
@@ -759,6 +810,10 @@ class MediaViewModel(
         private const val HISTORY_DIR = "media-history"
         private const val WORK_DIR = "media"
         private const val WIFI_JOIN_TIMEOUT_MS = 30_000L
+        /** How long to wait for a camera to appear in the BLE scan before giving up. */
+        private const val SCAN_TIMEOUT_MS = 20_000L
+        /** How long to wait for the BLE handshake to reach protocol-ready. */
+        private const val CONNECT_TIMEOUT_MS = 25_000L
         /** AP rejoin attempts allowed per session before giving up (osmosis MAX_WIFI_REJOINS). */
         private const val MAX_WIFI_REJOINS = 3
         private const val LOG_TAG = "OsmoMedia"
