@@ -17,6 +17,9 @@ object MediaListCodec {
     const val SD_CARD_CURSOR_NEWEST: Long = 0x0000_0001L
     const val INTERNAL_STORAGE_CURSOR_NEWEST: Long = 0x4000_0001L
 
+    /** Records requested per page (template byte 14 = 0x2d); a full page means more may follow. */
+    const val PAGE_SIZE: Int = 45
+
     private const val COUNTER_OFFSET = 4
     private const val CURSOR_OFFSET = 10
     private const val SUB_HEADER_SIZE = 10
