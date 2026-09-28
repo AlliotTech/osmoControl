@@ -639,12 +639,35 @@ class MediaViewModel(
                             },
                         )
                     }
+                    reloadCurrentLists()
                 },
                 onFailure = { e ->
                     Log.w(LOG_TAG, "delete failed", e)
                     _state.update { it.copy(status = "删除失败：${e.message ?: "未知错误"}") }
                 },
             )
+        }
+    }
+
+    /** Re-list both stores from the camera to reconcile the grid with reality (e.g. after a delete). */
+    private fun reloadCurrentLists() {
+        val repo = repository ?: return
+        viewModelScope.launch {
+            val pages = withContext(Dispatchers.IO) {
+                runCatching {
+                    LoadedPages(
+                        sd = repo.listNewest(MediaStore.SD_CARD),
+                        internal = repo.listNewest(MediaStore.INTERNAL),
+                    )
+                }.getOrNull()
+            } ?: return@launch
+            val cameraId = cameraIdFor(cameraIp)
+            _state.update {
+                it.copy(
+                    sdItems = pages.sd.items.map { row -> row.toRow(cameraId) },
+                    internalItems = pages.internal.items.map { row -> row.toRow(cameraId) },
+                )
+            }
         }
     }
 
