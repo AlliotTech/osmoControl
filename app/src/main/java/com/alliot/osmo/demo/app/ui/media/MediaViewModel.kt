@@ -622,20 +622,22 @@ class MediaViewModel(
             }
             result.fold(
                 onSuccess = { statusWord ->
-                    if (statusWord == 0) {
-                        val cameraId = cameraIdFor(cameraIp)
-                        history.markDeletedFromCamera(cameraId, row.item.path)
-                        _state.update { s ->
-                            s.copy(
-                                sdItems = s.sdItems.filterNot { it.item.path == row.item.path },
-                                internalItems = s.internalItems.filterNot { it.item.path == row.item.path },
-                                status = "已从相机删除 ${row.item.name}。",
-                            )
-                        }
-                    } else {
-                        _state.update {
-                            it.copy(status = "相机拒绝删除（status=${statusWord?.let { "0x%04x".format(it) } ?: "无应答"}）。")
-                        }
+                    Log.d(LOG_TAG, "delete result status=${statusWord?.let { "0x%04x".format(it) } ?: "null"}")
+                    // The camera performs the delete even when it answers with a non-zero/absent status
+                    // word (observed on an Action 6 Pro), so remove the row from the grid whenever the
+                    // call returned without throwing, and reconcile on the next reload.
+                    val cameraId = cameraIdFor(cameraIp)
+                    history.markDeletedFromCamera(cameraId, row.item.path)
+                    _state.update { s ->
+                        s.copy(
+                            sdItems = s.sdItems.filterNot { it.item.path == row.item.path },
+                            internalItems = s.internalItems.filterNot { it.item.path == row.item.path },
+                            status = when (statusWord) {
+                                0 -> "已从相机删除 ${row.item.name}。"
+                                null -> "已删除 ${row.item.name}（相机未回状态，已从列表移除）。"
+                                else -> "已删除 ${row.item.name}（相机返回 0x%04x）。".format(statusWord)
+                            },
+                        )
                     }
                 },
                 onFailure = { e ->
