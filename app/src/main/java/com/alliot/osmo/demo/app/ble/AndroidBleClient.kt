@@ -209,7 +209,7 @@ class AndroidBleClient(
                 pendingWrite = continuation
 
                 val queued = runCatching {
-                    writeCharacteristic(gatt, characteristic, bytes)
+                    writeCharacteristic(gatt, characteristic, bytes, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
                 }.getOrElse { error ->
                     if (pendingWrite === continuation) {
                         pendingWrite = null
@@ -597,12 +597,14 @@ class AndroidBleClient(
         gatt: BluetoothGatt,
         characteristic: BluetoothGattCharacteristic,
         bytes: ByteArray,
+        writeType: Int = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
     ): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeCharacteristic(characteristic, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothStatusCodes.SUCCESS
+            gatt.writeCharacteristic(characteristic, bytes, writeType) == BluetoothStatusCodes.SUCCESS
         } else {
             @Suppress("DEPRECATION")
             run {
+                characteristic.writeType = writeType
                 characteristic.value = bytes
                 gatt.writeCharacteristic(characteristic)
             }
