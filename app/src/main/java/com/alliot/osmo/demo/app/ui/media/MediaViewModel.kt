@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.LinkProperties
 import android.net.Network
 import android.os.Build
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -56,21 +57,16 @@ data class MediaRow(
 )
 
 data class MediaUiState(
-    val cameraIp: String = MediaViewModel.DEFAULT_CAMERA_IP,
     val connection: MediaConnectionState = MediaConnectionState.DISCONNECTED,
     val connectionError: String? = null,
     val isLoading: Boolean = false,
+    /** True once the camera is connected over BLE (prerequisite for the media Wi-Fi flow). */
+    val cameraConnected: Boolean = false,
     val sdItems: List<MediaRow> = emptyList(),
     val internalItems: List<MediaRow> = emptyList(),
     /** path -> 0..1 while a download is running. */
     val downloadProgress: Map<String, Float> = emptyMap(),
     val status: String? = null,
-    /** Camera AP SSID; blank means "phone is already on the AP, skip auto-join". */
-    val wifiSsid: String = "",
-    /** Camera AP passphrase. Held in memory only, never persisted. */
-    val wifiPassword: String = "",
-    /** The Osmo 360 AP is WPA3-SAE; every other body is WPA2-PSK. */
-    val wifiWpa3: Boolean = false,
     /** Row awaiting a frame-capture offset from the dialog, or null. */
     val frameCaptureTarget: MediaRow? = null,
     /** Row awaiting a trim in/out from the dialog, or null. */
@@ -94,26 +90,29 @@ private data class LoadedPages(
 /**
  * Media browsing / download / delete over the camera's Wi-Fi datalink.
  *
- * Bring-up: either supply the camera AP SSID/passphrase so [connectAndLoad]
- * auto-joins it (Android 10+, via [CameraApJoiner]) and binds the process to
- * that network, or leave the SSID blank and put the phone on the AP yourself.
- * Then [connectAndLoad] opens the UDP datalink ([DatalinkTransport]), lists
- * both stores ([MediaRepository]) and downloads go over HTTP
- * ([DownloadManager]). All blocking calls run on Dispatchers.IO.
+ * Bring-up mirrors osmosis: once the camera is paired over BLE, [connectAndLoad]
+ * reads the camera's own AP credentials over that link
+ * ([SessionController.fetchWifiCredentials]), joins the AP and binds the process
+ * ([CameraApJoiner]), opens the UDP datalink ([DatalinkTransport]) to the fixed
+ * camera gateway [DEFAULT_CAMERA_IP], lists both stores ([MediaRepository]) and
+ * downloads over HTTP ([DownloadManager]). No manual Wi-Fi / IP entry. All
+ * blocking calls run on Dispatchers.IO.
  */
 class MediaViewModel(
     appContext: Context,
     private val pairingIdentifier: String,
-    /** The live BLE session, used to read the camera's Wi-Fi credentials for auto-join. */
+    /** The live BLE session: source of the camera's Wi-Fi credentials and connection state. */
     private val sessionController: SessionController? = null,
 ) : ViewModel() {
 
-    private val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val filesDir: File = appContext.filesDir
     private val history: HistoryStore =
         FileHistoryStore(File(filesDir, HISTORY_DIR).apply { mkdirs() })
     private val workDir: File = File(filesDir, WORK_DIR).apply { mkdirs() }
     private val app = appContext.applicationContext
+
+    /** DJI Osmo cameras always serve their AP gateway here (osmosis hardcodes the same). */
+    private val cameraIp: String = DEFAULT_CAMERA_IP
 
     private val stackMutex = Mutex()
     private var transport: DatalinkTransport? = null
@@ -123,36 +122,22 @@ class MediaViewModel(
     private var wifiRejoins = 0
     private val pendingResumePaths = mutableSetOf<String>()
 
-    private val _state = MutableStateFlow(
-        MediaUiState(
-            cameraIp = prefs.getString(KEY_CAMERA_IP, DEFAULT_CAMERA_IP) ?: DEFAULT_CAMERA_IP,
-            wifiSsid = prefs.getString(KEY_WIFI_SSID, "") ?: "",
-        ),
-    )
+    private val _state = MutableStateFlow(MediaUiState())
     val state: StateFlow<MediaUiState> = _state.asStateFlow()
 
-    fun updateCameraIp(ip: String) {
-        _state.update { it.copy(cameraIp = ip, status = null) }
-        prefs.edit().putString(KEY_CAMERA_IP, ip).apply()
-    }
-
-    fun updateWifiSsid(ssid: String) {
-        _state.update { it.copy(wifiSsid = ssid, status = null) }
-        prefs.edit().putString(KEY_WIFI_SSID, ssid).apply()
-    }
-
-    fun updateWifiPassword(password: String) {
-        _state.update { it.copy(wifiPassword = password, status = null) }
-    }
-
-    fun updateWifiWpa3(wpa3: Boolean) {
-        _state.update { it.copy(wifiWpa3 = wpa3, status = null) }
+    init {
+        sessionController?.let { controller ->
+            viewModelScope.launch {
+                controller.status.collect { s ->
+                    _state.update { it.copy(cameraConnected = s.protocolReady && !s.sleeping) }
+                }
+            }
+        }
     }
 
     fun connectAndLoad() {
-        val ip = _state.value.cameraIp.trim()
-        if (ip.isEmpty()) {
-            _state.update { it.copy(status = "请先填写相机 IP。") }
+        if (sessionController != null && !_state.value.cameraConnected) {
+            _state.update { it.copy(status = "请先在“工作台”通过蓝牙连接相机。") }
             return
         }
         if (_state.value.connection == MediaConnectionState.CONNECTING ||
@@ -167,7 +152,7 @@ class MediaViewModel(
                 connection = MediaConnectionState.CONNECTING,
                 connectionError = null,
                 isLoading = true,
-                status = "正在连接 $ip …",
+                status = "正在连接相机 …",
             )
         }
         viewModelScope.launch {
@@ -176,14 +161,15 @@ class MediaViewModel(
                     stackMutex.withLock {
                         joinWifiIfNeeded()
                         transport?.close()
-                        val t = DatalinkTransport()
-                        check(t.open(ip, pairingIdentifier)) { "UDP datalink 握手失败" }
+                        val t = DatalinkTransport(log = { Log.d(LOG_TAG, "datalink: $it") })
+                        check(t.open(cameraIp, pairingIdentifier)) { "UDP datalink 握手失败" }
                         t.registerApp()
                         val repo = MediaRepository(t)
                         val dl = DownloadManager(
-                            http = UrlConnectionHttpClient(ip),
+                            http = UrlConnectionHttpClient(cameraIp),
                             history = history,
                             workDir = workDir,
+                            log = { Log.d(LOG_TAG, "download: $it") },
                         )
                         transport = t
                         repository = repo
@@ -196,6 +182,7 @@ class MediaViewModel(
                         )
                     }
                 } catch (e: Exception) {
+                    Log.w(LOG_TAG, "connectAndLoad failed", e)
                     Result.failure(e)
                 }
             }
@@ -203,7 +190,7 @@ class MediaViewModel(
                 onSuccess = { pages ->
                     val sdPage = pages.sd
                     val internalPage = pages.internal
-                    val cameraId = cameraIdFor(ip)
+                    val cameraId = cameraIdFor(cameraIp)
                     val sdRows = sdPage.items.map { it.toRow(cameraId) }
                     val internalRows = internalPage.items.map { it.toRow(cameraId) }
                     val hint = when {
@@ -247,45 +234,34 @@ class MediaViewModel(
     }
 
     /**
-     * Bring the phone onto the camera AP before any socket opens. Credentials come, in
-     * order of preference, from (1) a manually entered SSID/password, else (2) the
-     * connected camera itself over BLE ([SessionController.fetchWifiCredentials] —
-     * 0x07/0x07 SSID, 0x07/0x0e password, so no manual entry is normally needed), else
-     * (3) nothing, meaning the phone is assumed already on the AP. Throws with a
-     * user-facing message on join failure so the caller's failure path surfaces it.
+     * Read the camera's own AP credentials over the paired BLE link
+     * ([SessionController.fetchWifiCredentials] — 0x07/0x07 SSID, 0x07/0x0e password),
+     * then join that AP and bind the process ([CameraApJoiner]) before any socket opens.
+     * No manual entry; throws with a user-facing message when the camera isn't reachable
+     * over BLE or withholds the credentials, so the caller's failure path surfaces it.
      */
     private suspend fun joinWifiIfNeeded() {
-        var ssid = _state.value.wifiSsid.trim()
-        var password = _state.value.wifiPassword
-        var wpa3 = _state.value.wifiWpa3
-
-        if (ssid.isEmpty()) {
-            val creds = runCatching { sessionController?.fetchWifiCredentials() }.getOrNull()
-            if (creds != null) {
-                ssid = creds.ssid
-                password = creds.password
-                wpa3 = creds.wpa3
-                _state.update {
-                    it.copy(
-                        wifiSsid = creds.ssid,
-                        wifiWpa3 = creds.wpa3,
-                        status = "已从相机读取 Wi-Fi 凭据，正在入网「${creds.ssid}」…",
-                    )
-                }
-            }
-        }
-
-        if (ssid.isEmpty()) return
+        val creds = runCatching { sessionController?.fetchWifiCredentials() }
+            .onFailure { Log.w(LOG_TAG, "fetchWifiCredentials threw", it) }
+            .getOrNull()
+            ?: throw IllegalStateException(
+                "无法从相机获取 Wi-Fi 凭据，请确认已在“工作台”通过蓝牙连上相机。",
+            )
+        Log.d(LOG_TAG, "joinWifi: creds ssid='${creds.ssid}' wpa3=${creds.wpa3}")
+        val ssid = creds.ssid
+        val password = creds.password
+        val wpa3 = creds.wpa3
+        _state.update { it.copy(status = "已从相机读取 Wi-Fi 凭据，正在入网「$ssid」…") }
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            throw IllegalStateException("自动入网需要 Android 10 及以上；请手动连上相机 Wi-Fi 后重试。")
+            throw IllegalStateException("自动入网需要 Android 10 及以上。")
         }
         apJoiner?.release()
         val joined = CompletableDeferred<Result<Unit>>()
         val joiner = CameraApJoiner(
             app,
             object : CameraApJoiner.Listener {
-                override fun onLog(s: String) {}
+                override fun onLog(s: String) { Log.d(LOG_TAG, "apjoiner: $s") }
                 override fun onNetwork(network: Network, link: LinkProperties?) {
                     if (!joined.isCompleted) joined.complete(Result.success(Unit))
                     else onWifiRejoined()
@@ -297,6 +273,7 @@ class MediaViewModel(
             },
         )
         apJoiner = joiner
+        Log.d(LOG_TAG, "joinWifi: requesting AP '$ssid' wpa3=$wpa3")
         joiner.join(ssid, password, wpa3)
         val result = withTimeoutOrNull(WIFI_JOIN_TIMEOUT_MS) { joined.await() }
         if (result == null) {
@@ -396,7 +373,7 @@ class MediaViewModel(
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     dl.download(
-                        cameraId = cameraIdFor(_state.value.cameraIp.trim()),
+                        cameraId = cameraIdFor(cameraIp),
                         item = row.item,
                     ) { soFar, total ->
                         if (total != null && total > 0) {
@@ -410,7 +387,7 @@ class MediaViewModel(
             }
             result.fold(
                 onSuccess = { r ->
-                    val cameraId = cameraIdFor(_state.value.cameraIp.trim())
+                    val cameraId = cameraIdFor(cameraIp)
                     _state.update { s ->
                         val refresh: (List<MediaRow>) -> List<MediaRow> = { rows ->
                             rows.map { existing ->
@@ -456,7 +433,7 @@ class MediaViewModel(
     fun confirmFrameCapture(offsetMs: Long) {
         val row = _state.value.frameCaptureTarget ?: return
         val dl = downloader
-        val ip = _state.value.cameraIp.trim()
+        val ip = cameraIp
         if (dl == null) {
             _state.update { it.copy(frameCaptureTarget = null, status = "请先连接相机。") }
             return
@@ -502,7 +479,7 @@ class MediaViewModel(
     fun confirmTrim(startMs: Long, endMs: Long) {
         val row = _state.value.trimTarget ?: return
         val dl = downloader
-        val ip = _state.value.cameraIp.trim()
+        val ip = cameraIp
         if (dl == null) {
             _state.update { it.copy(trimTarget = null, status = "请先连接相机。") }
             return
@@ -549,7 +526,7 @@ class MediaViewModel(
     fun loadThumbnail(row: MediaRow) {
         val path = row.item.path
         if (_state.value.thumbnails.containsKey(path)) return
-        val ip = _state.value.cameraIp.trim()
+        val ip = cameraIp
         val item = row.item
         _state.update { it.copy(thumbnails = it.thumbnails + (path to null)) }
         viewModelScope.launch {
@@ -629,7 +606,7 @@ class MediaViewModel(
             result.fold(
                 onSuccess = { statusWord ->
                     if (statusWord == 0) {
-                        val cameraId = cameraIdFor(_state.value.cameraIp.trim())
+                        val cameraId = cameraIdFor(cameraIp)
                         history.markDeletedFromCamera(cameraId, row.item.path)
                         _state.update { s ->
                             s.copy(
@@ -704,14 +681,12 @@ class MediaViewModel(
 
     companion object {
         const val DEFAULT_CAMERA_IP = "192.168.2.1"
-        private const val PREFS_NAME = "media_prefs"
-        private const val KEY_CAMERA_IP = "camera_ip"
         private const val HISTORY_DIR = "media-history"
         private const val WORK_DIR = "media"
-        private const val KEY_WIFI_SSID = "wifi_ssid"
         private const val WIFI_JOIN_TIMEOUT_MS = 30_000L
         /** AP rejoin attempts allowed per session before giving up (osmosis MAX_WIFI_REJOINS). */
         private const val MAX_WIFI_REJOINS = 3
+        private const val LOG_TAG = "OsmoMedia"
     }
 }
 

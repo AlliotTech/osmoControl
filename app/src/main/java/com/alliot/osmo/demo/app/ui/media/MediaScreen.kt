@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -25,7 +24,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.Switch
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,7 +38,6 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.alliot.osmo.demo.app.ui.home.HomeFilledButton
@@ -64,53 +61,13 @@ fun MediaScreen(
         item {
             HomeSectionCard(title = "相机连接") {
                 Text(
-                    text = "已在工作台通过蓝牙连上相机时，点“连接并加载”会自动读取相机 Wi-Fi 并入网（Android 10+），" +
-                        "无需手动填写。下面的 SSID/密码仅在自动获取失败时作为备用。相机 IP：Action 5 Pro 默认 192.168.2.1。",
+                    text = if (state.cameraConnected) {
+                        "已通过蓝牙连上相机。点“连接并加载”将自动读取相机 Wi-Fi、入网并载入媒体，无需填写任何信息。"
+                    } else {
+                        "请先在“工作台”通过蓝牙连接相机，再回到这里加载媒体。"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                val inputsEnabled = state.connection != MediaConnectionState.CONNECTING && !state.isLoading
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = state.wifiSsid,
-                    onValueChange = viewModel::updateWifiSsid,
-                    label = { Text("相机 Wi-Fi 名称 (SSID)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = inputsEnabled,
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = state.wifiPassword,
-                    onValueChange = viewModel::updateWifiPassword,
-                    label = { Text("Wi-Fi 密码") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = inputsEnabled,
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Switch(
-                        checked = state.wifiWpa3,
-                        onCheckedChange = viewModel::updateWifiWpa3,
-                        enabled = inputsEnabled,
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "WPA3（Osmo 360 使用）",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = state.cameraIp,
-                    onValueChange = viewModel::updateCameraIp,
-                    label = { Text("相机 IP") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = inputsEnabled,
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(
@@ -118,7 +75,8 @@ fun MediaScreen(
                 ) {
                     HomeFilledButton(
                         onClick = viewModel::connectAndLoad,
-                        enabled = state.connection != MediaConnectionState.CONNECTING && !state.isLoading,
+                        enabled = state.cameraConnected &&
+                            state.connection != MediaConnectionState.CONNECTING && !state.isLoading,
                         kind = HomeHapticKind.PRIMARY,
                     ) {
                         Text(if (state.connection == MediaConnectionState.CONNECTED) "重新加载" else "连接并加载")
