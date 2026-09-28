@@ -6,7 +6,6 @@ import java.io.FileOutputStream
 import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
-import java.net.URLEncoder
 import java.security.MessageDigest
 
 /**
@@ -94,8 +93,11 @@ class DownloadManager(
     private val log: (String) -> Unit = {},
 ) {
 
+    // The camera's /v2 endpoint matches the `path` param literally (osmosis PathAddressing) — it does
+    // NOT %-decode, so the DCF path is passed raw. URL-encoding the slashes made every HEAD 404 and
+    // surfaced as "No HTTP mount serves".
     fun mediaUrl(item: MediaItem, storage: Int = item.store.index): String =
-        "/v2?storage=$storage&path=" + URLEncoder.encode(item.path, Charsets.UTF_8)
+        "/v2?storage=$storage&path=${item.path}"
 
     /**
      * Finds the mount serving [item] and its size: tries the manifest's

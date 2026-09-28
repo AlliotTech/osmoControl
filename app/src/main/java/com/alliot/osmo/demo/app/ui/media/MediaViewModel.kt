@@ -38,7 +38,6 @@ import java.io.File
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
-import java.net.URLEncoder
 
 enum class MediaConnectionState {
     DISCONNECTED,
@@ -540,7 +539,7 @@ class MediaViewModel(
         val dl = downloader ?: return null
         val storage = dl.probe(item)?.first ?: item.store.index
         if (item.thumbPath.isNotBlank()) {
-            val url = "/v2?storage=$storage&path=" + URLEncoder.encode(item.thumbPath, Charsets.UTF_8)
+            val url = "/v2?storage=$storage&path=${item.thumbPath}"
             httpGetCapped(ip, url, Long.MAX_VALUE)?.takeIf { it.isNotEmpty() }?.let { return it }
         }
         if (!item.isVideo) {
