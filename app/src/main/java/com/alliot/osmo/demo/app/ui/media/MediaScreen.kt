@@ -148,7 +148,7 @@ fun MediaScreen(
             onDownload = { viewModel.download(detailRow) },
             onCapture = { viewModel.requestFrameCapture(detailRow); detailPath = null },
             onTrim = { viewModel.requestTrim(detailRow); detailPath = null },
-            onDelete = { viewModel.requestDelete(detailRow); detailPath = null },
+            onDelete = { viewModel.requestDelete(detailRow) },
             onDismiss = { detailPath = null },
         )
     } else if (detailPath != null) {

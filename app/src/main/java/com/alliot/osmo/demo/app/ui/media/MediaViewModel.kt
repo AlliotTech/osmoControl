@@ -11,6 +11,7 @@ import androidx.lifecycle.viewModelScope
 import com.alliot.osmo.demo.app.di.AppContainer
 import com.alliot.osmo.demo.app.net.CameraApJoiner
 import com.alliot.osmo.demo.app.media.CameraFrameCapture
+import com.alliot.osmo.demo.app.media.GalleryStore
 import com.alliot.osmo.demo.app.media.CameraTrimmedDownloader
 import com.alliot.osmo.demo.app.media.TrimRange
 import com.alliot.osmo.demo.media.datalink.DatalinkTransport
@@ -384,21 +385,35 @@ class MediaViewModel(
             result.fold(
                 onSuccess = { r ->
                     val cameraId = cameraIdFor(cameraIp)
+                    val savedToGallery = if (!r.skippedAsDuplicate &&
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                    ) {
+                        withContext(Dispatchers.IO) {
+                            runCatching {
+                                val uri = GalleryStore.publish(app, r.file, row.item.name, row.item.isVideo)
+                                if (uri != null) r.file.delete()
+                                uri != null
+                            }.getOrDefault(false)
+                        }
+                    } else {
+                        false
+                    }
                     _state.update { s ->
                         val refresh: (List<MediaRow>) -> List<MediaRow> = { rows ->
                             rows.map { existing ->
-                                if (existing.item.path == path) existing.item.toRow(cameraId)
-                                else existing
+                                if (existing.item.path == path) existing.item.toRow(cameraId) else existing
                             }
                         }
                         s.copy(
                             downloadProgress = s.downloadProgress - path,
                             sdItems = refresh(s.sdItems),
                             internalItems = refresh(s.internalItems),
-                            status = if (r.skippedAsDuplicate) {
-                                "${row.item.name} 已下载过，跳过。"
-                            } else {
-                                "下载完成：${row.item.name}（${formatBytes(r.bytesWritten)}，SHA-256 已校验）。"
+                            status = when {
+                                r.skippedAsDuplicate -> "${row.item.name} 已下载过，跳过。"
+                                savedToGallery ->
+                                    "下载完成：${row.item.name}（${formatBytes(r.bytesWritten)}），已保存到系统相册。"
+                                else ->
+                                    "下载完成：${row.item.name}（${formatBytes(r.bytesWritten)}，SHA-256 已校验）。"
                             },
                         )
                     }
@@ -580,6 +595,7 @@ class MediaViewModel(
     }
 
     fun requestDelete(row: MediaRow) {
+        Log.d(LOG_TAG, "requestDelete: ${row.item.name} canDelete=${row.canDelete} handle=0x${row.item.handle.toString(16)}")
         _state.update { it.copy(deleteCandidate = row) }
     }
 
